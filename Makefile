@@ -22,23 +22,23 @@ RELEASE_DIR = release
 $(shell mkdir -p $(BUILD_ROOT) $(RELEASE_DIR))
 
 # Explicitly list your executables here
-EXECUTABLES = fwunpack fwunpack2
+EXECUTABLES = fwunpack # fwunpack2
 
 # Define sources for each executable (relative to src/)
-fwunpack_SRCS = encryption.cpp fwunpack.cpp get_encrypted_data.cpp get_normal_data.cpp keydata.cpp lz77.cpp part345_comp.cpp
-fwunpack2_SRCS = encryption.cpp fwunpack.cpp get_encrypted_data.cpp get_normal_data.cpp keydata.cpp lz77.cpp part345_comp.cpp
+fwunpack_SRCS = fwunpack.cpp bitstream.cpp crc.cpp encryption.cpp get_encrypted_data.cpp get_normal_data.cpp keydata.cpp lz77.cpp part12_comp.cpp part345_comp.cpp tree.cpp 
+# fwunpack2_SRCS = encryption.cpp fwunpack.cpp get_encrypted_data.cpp get_normal_data.cpp keydata.cpp lz77.cpp part345_comp.cpp
 
 # Prepend source directory to all source files
 fwunpack_SRCS := $(addprefix $(SRC_DIR)/, $(fwunpack_SRCS))
-fwunpack2_SRCS := $(addprefix $(SRC_DIR)/, $(fwunpack2_SRCS))
+# fwunpack2_SRCS := $(addprefix $(SRC_DIR)/, $(fwunpack2_SRCS))
 
 # Build rules for each executable with separate build folders
 fwunpack: BUILD_DIR=$(BUILD_ROOT)/fwunpack
-fwunpack2: BUILD_DIR=$(BUILD_ROOT)/fwunpack2
+# fwunpack2: BUILD_DIR=$(BUILD_ROOT)/fwunpack2
 
 # Generate object file paths
 fwunpack: OBJS=$(patsubst $(SRC_DIR)/%.cpp, $(BUILD_ROOT)/fwunpack/%.o, $(fwunpack_SRCS))
-fwunpack2: OBJS=$(patsubst $(SRC_DIR)/%.cpp, $(BUILD_ROOT)/fwunpack2/%.o, $(fwunpack2_SRCS))
+# fwunpack2: OBJS=$(patsubst $(SRC_DIR)/%.cpp, $(BUILD_ROOT)/fwunpack2/%.o, $(fwunpack2_SRCS))
 
 # Default target: build all executables
 all: $(EXECUTABLES)
