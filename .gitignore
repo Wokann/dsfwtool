@@ -1,0 +1,23 @@
+# Compiled object files
+*.i
+*.s
+*.o
+*.obj
+
+# Compiled executable files
+*.out
+*.exe
+*.bin
+*.app
+
+# Build directories
+build/
+out/
+bin/
+dist/
+release/
+
+# System-specific files
+.DS_Store       # macOS
+Thumbs.db       # Windows
+    
