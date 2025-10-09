@@ -22,36 +22,40 @@ RELEASE_DIR = release
 $(shell mkdir -p $(BUILD_ROOT) $(RELEASE_DIR))
 
 # Explicitly list your executables here
-EXECUTABLES = fwunpack # fwunpack2
+EXECUTABLES = fwpack fwcrypt fwcomp
 
 # Define sources for each executable (relative to src/)
-fwunpack_SRCS = fwunpack.cpp bitstream.cpp crc.cpp encryption.cpp get_encrypted_data.cpp get_normal_data.cpp keydata.cpp lz77.cpp part12_comp.cpp part345_comp.cpp tree.cpp 
-# fwunpack2_SRCS = encryption.cpp fwunpack.cpp get_encrypted_data.cpp get_normal_data.cpp keydata.cpp lz77.cpp part345_comp.cpp
+fwpack_SRCS = fwpack.cpp encryption.cpp keydata.cpp part12_comp.cpp part345_comp.cpp bitstream.cpp tree.cpp
+fwcrypt_SRCS = fwcrypt.cpp encryption.cpp keydata.cpp
+fwcomp_SRCS = fwcomp.cpp part12_comp.cpp part345_comp.cpp bitstream.cpp tree.cpp
 
 # Prepend source directory to all source files
-fwunpack_SRCS := $(addprefix $(SRC_DIR)/, $(fwunpack_SRCS))
-# fwunpack2_SRCS := $(addprefix $(SRC_DIR)/, $(fwunpack2_SRCS))
+fwpack_SRCS := $(addprefix $(SRC_DIR)/, $(fwpack_SRCS))
+fwcrypt_SRCS := $(addprefix $(SRC_DIR)/, $(fwcrypt_SRCS))
+fwcomp_SRCS := $(addprefix $(SRC_DIR)/, $(fwcomp_SRCS))
 
 # Build rules for each executable with separate build folders
-fwunpack: BUILD_DIR=$(BUILD_ROOT)/fwunpack
-# fwunpack2: BUILD_DIR=$(BUILD_ROOT)/fwunpack2
+fwpack: BUILD_DIR=$(BUILD_ROOT)/fwpack
+fwcrypt: BUILD_DIR=$(BUILD_ROOT)/fwcrypt
+fwcomp: BUILD_DIR=$(BUILD_ROOT)/fwcomp
 
 # Generate object file paths
-fwunpack: OBJS=$(patsubst $(SRC_DIR)/%.cpp, $(BUILD_ROOT)/fwunpack/%.o, $(fwunpack_SRCS))
-# fwunpack2: OBJS=$(patsubst $(SRC_DIR)/%.cpp, $(BUILD_ROOT)/fwunpack2/%.o, $(fwunpack2_SRCS))
+fwpack: OBJS=$(patsubst $(SRC_DIR)/%.cpp, $(BUILD_ROOT)/fwpack/%.o, $(fwpack_SRCS))
+fwcrypt: OBJS=$(patsubst $(SRC_DIR)/%.cpp, $(BUILD_ROOT)/fwcrypt/%.o, $(fwcrypt_SRCS))
+fwcomp: OBJS=$(patsubst $(SRC_DIR)/%.cpp, $(BUILD_ROOT)/fwcomp/%.o, $(fwcomp_SRCS))
 
 # Default target: build all executables
 all: $(EXECUTABLES)
 
-# Build each executable
+# Build each executable with chained compilation
 $(EXECUTABLES):
 	# Create build subfolder
 	mkdir -p $(BUILD_DIR)
-	# Compile source files to intermediate and object files in build subfolder
+	# Compile with chained steps: preprocess → assemble → compile → link
 	$(foreach src, $($@_SRCS), \
-		$(CXX) $(CXXFLAGS) -E $(src) -o $(patsubst $(SRC_DIR)/%.cpp, $(BUILD_DIR)/%.i, $(src)); \
-		$(CXX) $(CXXFLAGS) -S $(src) -o $(patsubst $(SRC_DIR)/%.cpp, $(BUILD_DIR)/%.s, $(src)); \
-		$(CXX) $(CXXFLAGS) -c $(src) -o $(patsubst $(SRC_DIR)/%.cpp, $(BUILD_DIR)/%.o, $(src));)
+		$(CXX) $(CXXFLAGS) -E $(src) -o $(patsubst $(SRC_DIR)/%.cpp, $(BUILD_DIR)/%.i, $(src)) && \
+		$(CXX) $(CXXFLAGS) -S $(BUILD_DIR)/$(notdir $(patsubst %.cpp, %.i, $(src))) -o $(patsubst $(SRC_DIR)/%.cpp, $(BUILD_DIR)/%.s, $(src)) && \
+		$(CXX) $(CXXFLAGS) -c $(BUILD_DIR)/$(notdir $(patsubst %.cpp, %.s, $(src))) -o $(patsubst $(SRC_DIR)/%.cpp, $(BUILD_DIR)/%.o, $(src));)
 	# Link object files to create executable
 	$(CXX) $(CXXFLAGS) -o $(RELEASE_DIR)/$@$(EXE_EXT) $(OBJS) $(LDFLAGS)
 
@@ -61,4 +65,3 @@ clean:
 
 # Phony targets
 .PHONY: all clean
-    
