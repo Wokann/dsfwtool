@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 #include "part345_comp.h"
 #include "bitstream.h"
@@ -600,4 +601,65 @@ u32 compress_part345(u8 *dst, u8 *src, u32 size) {
 	for(i = 0; i < 2; i++) free(bs[i].ptr);
 	
 	return ret;
+}
+
+u32 getCompressedPart345Size(u8 *src) {
+    u32 r0, x1, x2, sizedec, posdst, offset;
+    
+    // decompressed size
+    sizedec = (src[5] << 16) | (src[6] << 8) | (src[7] << 0);
+
+    // init 1st stream (contains lz single bytes or lz lengths)
+    bitstream_clear(&datadec[0].bitstream);
+    offset = 12;
+    datadec[0].bitstream.ptr = src + offset;
+    datadec[0].unk1 = 0x200;
+    datadec[0].value = 0;
+    datadec[0].bitlen = 9;
+    datadec[0].table[0] = (u32*)malloc(0x1000);
+    datadec[0].table[1] = (u32*)malloc(0x1000);
+    make_tree(src, 0);
+
+    // init 2nd stream (contains lz distance values)
+    bitstream_clear(&datadec[1].bitstream);
+    offset = (src[8] << 24) | (src[9] << 16) | (src[10] << 8) | (src[11] << 0);
+    datadec[1].bitstream.ptr = src + offset;
+    datadec[1].bitstream.pos = 0; // 初始化已读字节数
+    datadec[1].unk1 = 0x800;
+    datadec[1].value = 0;
+    datadec[1].bitlen = 11;
+    datadec[1].table[0] = (u32*)malloc(0x4000);
+    datadec[1].table[1] = (u32*)malloc(0x4000);
+    make_tree(src, 1);
+
+    posdst = 0;
+    while(posdst < sizedec) {
+        x1 = datadec[0].unk2;
+        while(x1 >= 0x200) {
+            r0 = stream_read_bits(1, 0);
+            x1 = *(datadec[0].table[r0] + x1);
+        }
+
+        if (x1 < 0x100) {
+            posdst++;
+        } else {
+            x2 = datadec[1].unk2;
+            while(x2 >= 0x800) {
+                r0 = stream_read_bits(1, 1);
+                x2 = *(datadec[1].table[r0] + x2);
+            }
+            posdst += x1 - 0x100 + 3;
+        }
+    }
+
+    u32 effective_size = offset + datadec[1].bitstream.pos;
+    printf("Effective compressed size: %08X bytes\n", effective_size);
+
+    // cleanup
+    free(datadec[0].table[0]);
+    free(datadec[0].table[1]);
+    free(datadec[1].table[0]);
+    free(datadec[1].table[1]);
+
+    return effective_size;
 }
