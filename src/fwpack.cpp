@@ -17,6 +17,7 @@
 #endif
 
 #include "nds_types.h"
+#include "crc.h"
 #include "firmware.h"
 #include "encryption.h"
 #include "part345_comp.h"
@@ -99,7 +100,7 @@ void print_fw_header(FW_HEADER* hdr) {
     printf("shift_amounts: 0x%04X (shift1=%d shift2=%d shift3=%d shift4=%d)\n",
            hdr->shift_amounts, shift1, shift2, shift3, shift4);
     printf("part5_romaddr(raw/8): 0x%04X / calc: 0x%08X\n", hdr->part5_romaddr, part5_rom);
-    printf("fw_timestamp: 20%02d-%02d-%02d %02d:%02d\n",
+    printf("fw_timestamp: 20%02X-%02X-%02X %02X:%02X\n",
            hdr->fw_timestamp[4], hdr->fw_timestamp[3], hdr->fw_timestamp[2],
            hdr->fw_timestamp[1], hdr->fw_timestamp[0]);
     printf("console_type: 0x%02X %s\n", hdr->console_type,
@@ -244,18 +245,43 @@ int main(int argc, char* argv[]) {
             fwrite(hdr2,1,FW_HEADER_SIZE,out);
             fclose(out);
 
+            // 计算 FlashMe part1/part2 地址
             u32 fm_rom[2];
             fm_rom[0] = hdr2->part1_romaddr * (1 << (2 + (hdr2->shift_amounts &7)));
             fm_rom[1] = hdr2->part2_romaddr * (1 << (2 + ((hdr2->shift_amounts>>6)&7)));
             const char* fm_names[2] = {"arm9_boot_code_flashme.bin","arm7_boot_code_flashme.bin"};
+
+            // 按地址排序索引
+            int fm_indices[2] = {0,1};
+            if(fm_rom[0] > fm_rom[1]){
+                int t = fm_indices[0]; fm_indices[0] = fm_indices[1]; fm_indices[1] = t;
+            }
+
+            u32 fm_sizes[2] = {0};
+            u8* fm_parts[2] = {0};
+
+            // 计算有效压缩大小并导出
             for(int i=0;i<2;i++){
-                u32 next_addr = (i==1)? fw_size : fm_rom[i+1];
-                u32 sz = next_addr - fm_rom[i];
-                snprintf(out_path,sizeof(out_path),"%s/%s",unpack_output_folder,fm_names[i]);
+                int idx = fm_indices[i];
+                u32 next_addr = (i==1)? fw_size : fm_rom[fm_indices[i+1]];
+                u32 raw_size = next_addr - fm_rom[idx];
+                u32 eff_size = getCompressedLZ77Size(fw_data + fm_rom[idx]);
+
+                // 分配并拷贝有效大小
+                fm_sizes[idx] = (raw_size < eff_size) ? raw_size : eff_size;
+                fm_parts[idx] = (u8*)malloc(fm_sizes[idx]);
+                memcpy(fm_parts[idx], fw_data + fm_rom[idx], fm_sizes[idx]);
+
+                // 写文件
+                snprintf(out_path,sizeof(out_path),"%s/%s",unpack_output_folder,fm_names[idx]);
                 out = fopen(out_path,"wb");
-                fwrite(fw_data + fm_rom[i],1,sz,out);
-                fclose(out);
-                printf("%s: offset=0x%06X, size=0x%06X\n",fm_names[i],fm_rom[i],sz);
+                if(out){ fwrite(fm_parts[idx],1,fm_sizes[idx],out); fclose(out); }
+
+                printf("%s: offset=0x%06X, size=0x%06X, effective=0x%06X, pad=0x%06X\n",
+                    fm_names[idx], fm_rom[idx], raw_size, fm_sizes[idx], raw_size-fm_sizes[idx]);
+
+                free(fm_parts[idx]);
+                fm_parts[idx] = NULL;
             }
         }
 
@@ -335,13 +361,66 @@ int main(int argc, char* argv[]) {
 				new_rom_addrs[idx] = tentative;
 			}
 		}
-
 		// 根据新地址更新 header 中的字段
 		hdr.part1_romaddr = new_rom_addrs[0] / (1 << (2 + shift1));
 		hdr.part2_romaddr = new_rom_addrs[1] / (1 << (2 + shift3));
 		hdr.part3_romaddr = new_rom_addrs[2] / 8;
 		hdr.part4_romaddr = new_rom_addrs[3] / 8;
 		hdr.part5_romaddr = new_rom_addrs[4] / 8;
+
+        // 更新crc16
+        u8 *part1_decrypted = NULL, *part2_decrypted = NULL;
+        u8 *part1_decomp = NULL, *part2_decomp = NULL;
+        u32 part1_decomp_size = 0, part2_decomp_size = 0;
+        // part1 2 解密
+        part1_decrypted = (u8*)malloc(sizes[0]);
+        memcpy(part1_decrypted, parts[0], sizes[0]);
+        part2_decrypted = (u8*)malloc(sizes[1]);
+        memcpy(part2_decrypted, parts[1], sizes[1]);
+        init_keycode(*(u32*)hdr.fw_identifier, 2, 0x0C);
+        decrypt_buffer(parts[0], part1_decrypted, sizes[0]);
+        decrypt_buffer(parts[1], part2_decrypted, sizes[1]);
+        // 计算解压后大小并解压
+        part1_decomp_size = decompressLZ77(NULL,part1_decrypted);
+        part1_decomp = (u8*)malloc(part1_decomp_size);
+        decompressLZ77(part1_decomp,part1_decrypted);
+        part2_decomp_size = decompressLZ77(NULL,part2_decrypted);
+        part2_decomp = (u8*)malloc(part2_decomp_size);
+        decompressLZ77(part2_decomp,part2_decrypted);
+        // 计算 part12 CRC（先 part1 再 part2）
+        u16 crc_p1 = swiCRC(0xFFFF, (u32*)part1_decomp, (u32)part1_decomp_size);
+        u16 part12_crc = swiCRC(crc_p1, (u32*)part2_decomp, (u32)part2_decomp_size);
+
+        // --- 计算 part3/part4/part5 的解压并计算 part34 & part5 CRC ---
+        u8 *p3_decomp = NULL, *p4_decomp = NULL, *p5_decomp = NULL;
+        u32 p3_decomp_size = 0, p4_decomp_size = 0, p5_decomp_size = 0;
+        // part345 解压
+        p3_decomp_size = decompress_part345(NULL, parts[2]);
+        p3_decomp = (u8*)malloc(p3_decomp_size);
+        decompress_part345(p3_decomp, parts[2]);
+        p4_decomp_size = decompress_part345(NULL, parts[3]);
+        p4_decomp = (u8*)malloc(p3_decomp_size);
+        decompress_part345(p4_decomp, parts[3]);
+        p5_decomp_size = decompress_part345(NULL, parts[4]);
+        p5_decomp = (u8*)malloc(p5_decomp_size);
+        decompress_part345(p5_decomp, parts[4]);
+        // 计算 part34 CRC（先 part3 再 part4）
+        u16 crc_p3 = swiCRC(0xFFFF, (u32*)p3_decomp, (u32)p3_decomp_size);
+        u16 part34_crc = swiCRC(crc_p3, (u32*)p4_decomp, (u32)p4_decomp_size);
+        // 计算 part5 CRC
+        u16 part5_crc = swiCRC(0xFFFF, (u32*)p5_decomp, (u32)p5_decomp_size);
+
+        free(part1_decrypted); part1_decrypted = NULL;
+        free(part2_decrypted); part2_decrypted = NULL;
+        free(part1_decomp); part1_decomp = NULL;
+        free(part2_decomp); part2_decomp = NULL;
+        free(p3_decomp); p3_decomp = NULL;
+        free(p4_decomp); p4_decomp = NULL;
+        free(p5_decomp); p5_decomp = NULL;
+
+        hdr.part12_crc16 = part12_crc;
+        hdr.part34_crc16 = part34_crc;
+        hdr.part5_crc16 = part5_crc;
 
 		// 计算 firmware 总大小，支持 256K / 512K 模式
 		u32 fw_size = new_rom_addrs[4] + sizes[4];
@@ -361,38 +440,58 @@ int main(int argc, char* argv[]) {
 				part_filenames[i], orig_rom_addrs[i], new_rom_addrs[i], sizes[i]);
 		}
 
-		// 写入 flashme 文件（如果存在）
-		char flashme_header[1024];
-		snprintf(flashme_header,sizeof(flashme_header),"%s/header_flashme.bin",pack_input_folder);
-		if(access(flashme_header,0)==0){
-			FILE* fh = fopen(flashme_header,"rb");
-			if(fh){
-				FW_HEADER hdr2;
-				fread(&hdr2,1,FW_HEADER_SIZE,fh);
-				fclose(fh);
-				u32 fm_rom[2];
-				fm_rom[0] = hdr2.part1_romaddr*(1<<(2+(hdr2.shift_amounts&7)));
-				fm_rom[1] = hdr2.part2_romaddr*(1<<(2+((hdr2.shift_amounts>>6)&7)));
-				const char* fm_files[3] = {"header_flashme.bin","arm9_boot_code_flashme.bin","arm7_boot_code_flashme.bin"};
-				for(int i=0;i<3;i++){
-					char path[1024];
-					snprintf(path,sizeof(path),"%s/%s",pack_input_folder,fm_files[i]);
-					FILE* f = fopen(path,"rb");
-					if(!f){ printf("Missing flashme file: %s\n",path); continue; }
-					fseek(f,0,SEEK_END);
-					size_t sz = ftell(f);
-					fseek(f,0,SEEK_SET);
-					u8* buf = (u8*)malloc(sz);
-					fread(buf,1,sz,f);
-					fclose(f);
-					if(i==0) memcpy(fw_data,buf,sz);
-					else if(i==1) memcpy(fw_data+fm_rom[0],buf,sz);
-					else if(i==2) memcpy(fw_data+fm_rom[1],buf,sz);
-					free(buf);
-					printf("%s: written\n",fm_files[i]);
-				}
-			}
-		}
+        // --- 写入 FlashMe (如果存在) ---
+        char flashme_header_path[1024];
+        snprintf(flashme_header_path, sizeof(flashme_header_path), "%s/header_flashme.bin", pack_input_folder);
+
+        if(access(flashme_header_path, 0) == 0) {
+            FILE* fh = fopen(flashme_header_path, "rb");
+            if (fh) {
+                FW_HEADER hdr2;
+                fread(&hdr2, 1, FW_HEADER_SIZE, fh);
+                fclose(fh);
+
+                // FlashMe header 固定写入偏移 0x3F680
+                u32 hdr2_offset;
+                hdr2_offset = 0x3F680;
+                //hdr2_offset = (fw_size == 0x40000) ? 0x3F680 : 0x7F680;
+                memcpy(fw_data + hdr2_offset, &hdr2, FW_HEADER_SIZE);
+                printf("FlashMe header written at offset 0x%06X\n", hdr2_offset);
+
+                // 计算 FlashMe 各部分地址
+                int fshift1 = hdr2.shift_amounts & 7;
+                int fshift3 = (hdr2.shift_amounts >> 6) & 7;
+
+                u32 fm_rom[2];
+                fm_rom[0] = hdr2.part1_romaddr * (1 << (2 + fshift1));
+                fm_rom[1] = hdr2.part2_romaddr * (1 << (2 + fshift3));
+
+                const char* fm_files[2] = {
+                    "arm9_boot_code_flashme.bin",
+                    "arm7_boot_code_flashme.bin"
+                };
+
+                for (int i = 0; i < 2; i++) {
+                    char path[1024];
+                    snprintf(path, sizeof(path), "%s/%s", pack_input_folder, fm_files[i]);
+                    FILE* f = fopen(path, "rb");
+                    if (!f) {
+                        printf("Missing FlashMe file: %s\n", path);
+                        continue;
+                    }
+                    fseek(f, 0, SEEK_END);
+                    size_t sz = ftell(f);
+                    fseek(f, 0, SEEK_SET);
+                    u8* buf = (u8*)malloc(sz);
+                    fread(buf, 1, sz, f);
+                    fclose(f);
+
+                    memcpy(fw_data + fm_rom[i], buf, sz);
+                    free(buf);
+                    printf("%s written at 0x%06X (size 0x%06X)\n", fm_files[i], fm_rom[i], (u32)sz);
+                }
+            }
+        }
 
 		// 输出 firmware 到指定文件（-o 指向文件路径）
 		// 确保输出文件的父目录存在

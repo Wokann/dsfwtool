@@ -25,7 +25,7 @@ $(shell mkdir -p $(BUILD_ROOT) $(RELEASE_DIR))
 EXECUTABLES = fwpack fwcrypt fwcomp
 
 # Define sources for each executable (relative to src/)
-fwpack_SRCS = fwpack.cpp encryption.cpp keydata.cpp part12_comp.cpp part345_comp.cpp bitstream.cpp tree.cpp
+fwpack_SRCS = fwpack.cpp encryption.cpp keydata.cpp part12_comp.cpp part345_comp.cpp bitstream.cpp tree.cpp crc.cpp
 fwcrypt_SRCS = fwcrypt.cpp encryption.cpp keydata.cpp
 fwcomp_SRCS = fwcomp.cpp part12_comp.cpp part345_comp.cpp bitstream.cpp tree.cpp
 
