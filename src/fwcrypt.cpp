@@ -46,7 +46,6 @@ int mkdir_recursive(const char *path) {
     return 0;
 }
 
-#define HEADER_SIZE 0x200
 
 typedef enum {
     MODE_ENCRYPT = 0,
@@ -117,9 +116,9 @@ int main(int argc, char* argv[])
     // 读取 header
     FILE* header_bin = fopen(header_path, "rb");
     if (!header_bin) { printf("Error: Failed to open header file: %s\n", header_path); return -1; }
-    u8* header_data = (u8*)malloc(HEADER_SIZE);
+    u8* header_data = (u8*)malloc(FW_HEADER_SIZE - 0x80);
     if (!header_data) { printf("Error: Failed to allocate memory for header.\n"); fclose(header_bin); return -1; }
-    if (fread(header_data, 1, HEADER_SIZE, header_bin) < HEADER_SIZE) {
+    if (fread(header_data, 1, FW_HEADER_SIZE - 0x80, header_bin) < FW_HEADER_SIZE - 0x80) {
         printf("Error: Header file too small\n");
         fclose(header_bin); free(header_data); return -1;
     }

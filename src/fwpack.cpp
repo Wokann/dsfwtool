@@ -178,7 +178,7 @@ int main(int argc, char* argv[]) {
         char out_path[1024];
         snprintf(out_path,sizeof(out_path),"%s/header.bin",unpack_output_folder);
         FILE* out = fopen(out_path,"wb");
-        fwrite(fw_data,1,FW_HEADER_SIZE,out);
+        fwrite(fw_data,1,FW_HEADER_SIZE - 0x80,out);
         fclose(out);
 
         int shift1 = hdr->shift_amounts & 7;
@@ -242,7 +242,7 @@ int main(int argc, char* argv[]) {
 
             snprintf(out_path,sizeof(out_path),"%s/header_flashme.bin",unpack_output_folder);
             out = fopen(out_path,"wb");
-            fwrite(hdr2,1,FW_HEADER_SIZE,out);
+            fwrite(hdr2,1,FW_HEADER_SIZE - 0x80,out);
             fclose(out);
 
             // 计算 FlashMe part1/part2 地址
@@ -299,7 +299,7 @@ int main(int argc, char* argv[]) {
 		FILE* header_bin = fopen(header_path,"rb");
 		if(!header_bin){ printf("Failed to open header: %s\n", header_path); return -1; }
 		FW_HEADER hdr;
-		fread(&hdr,1,FW_HEADER_SIZE,header_bin);
+		fread(&hdr,1,FW_HEADER_SIZE - 0x80,header_bin);
 		fclose(header_bin);
 
 		// 保存原始 ROM 地址顺序
@@ -430,7 +430,7 @@ int main(int argc, char* argv[]) {
 		u8* fw_data = (u8*)calloc(1, fw_size);
 
 		// 写入 header
-		memcpy(fw_data, &hdr, FW_HEADER_SIZE);
+		memcpy(fw_data, &hdr, FW_HEADER_SIZE - 0x80);
 
 		// 写入各 part
 		for(int i=0;i<5;i++){
@@ -448,28 +448,30 @@ int main(int argc, char* argv[]) {
             FILE* fh = fopen(flashme_header_path, "rb");
             if (fh) {
                 FW_HEADER hdr2;
-                fread(&hdr2, 1, FW_HEADER_SIZE, fh);
+                fread(&hdr2, 1, FW_HEADER_SIZE - 0x80, fh);
                 fclose(fh);
 
                 // FlashMe header 固定写入偏移 0x3F680
-                u32 hdr2_offset;
-                hdr2_offset = 0x3F680;
-                //hdr2_offset = (fw_size == 0x40000) ? 0x3F680 : 0x7F680;
-                memcpy(fw_data + hdr2_offset, &hdr2, FW_HEADER_SIZE);
+                u32 hdr2_offset = 0x3F680;
+                memcpy(fw_data + hdr2_offset, &hdr2, FW_HEADER_SIZE - 0x80);
                 printf("FlashMe header written at offset 0x%06X\n", hdr2_offset);
 
-                // 计算 FlashMe 各部分地址
+                // ---- FlashMe 地址与 shift 计算 ----
                 int fshift1 = hdr2.shift_amounts & 7;
                 int fshift3 = (hdr2.shift_amounts >> 6) & 7;
 
-                u32 fm_rom[2];
-                fm_rom[0] = hdr2.part1_romaddr * (1 << (2 + fshift1));
-                fm_rom[1] = hdr2.part2_romaddr * (1 << (2 + fshift3));
+                u32 orig_rom[2];
+                orig_rom[0] = hdr2.part1_romaddr * (1 << (2 + fshift1));
+                orig_rom[1] = hdr2.part2_romaddr * (1 << (2 + fshift3));
 
                 const char* fm_files[2] = {
                     "arm9_boot_code_flashme.bin",
                     "arm7_boot_code_flashme.bin"
                 };
+
+                // ---- 读取两个 part ----
+                u32 fm_sizes[2] = {0};
+                u8* fm_parts[2] = {0};
 
                 for (int i = 0; i < 2; i++) {
                     char path[1024];
@@ -482,14 +484,72 @@ int main(int argc, char* argv[]) {
                     fseek(f, 0, SEEK_END);
                     size_t sz = ftell(f);
                     fseek(f, 0, SEEK_SET);
-                    u8* buf = (u8*)malloc(sz);
-                    fread(buf, 1, sz, f);
+                    fm_parts[i] = (u8*)malloc(sz);
+                    fread(fm_parts[i], 1, sz, f);
                     fclose(f);
-
-                    memcpy(fw_data + fm_rom[i], buf, sz);
-                    free(buf);
-                    printf("%s written at 0x%06X (size 0x%06X)\n", fm_files[i], fm_rom[i], (u32)sz);
+                    fm_sizes[i] = (u32)sz;
                 }
+
+                // ---- 计算实际 ROM 地址（按顺序排列）----
+                int fm_indices[2] = {0, 1};
+                if (orig_rom[0] > orig_rom[1]) {
+                    int t = fm_indices[0];
+                    fm_indices[0] = fm_indices[1];
+                    fm_indices[1] = t;
+                }
+
+                u32 new_rom[2];
+                for (int i = 0; i < 2; i++) {
+                    int idx = fm_indices[i];
+                    if (i == 0) new_rom[idx] = orig_rom[idx];
+                    else {
+                        int prev = fm_indices[i - 1];
+                        u32 tentative = new_rom[prev] + fm_sizes[prev];
+                        if (tentative < orig_rom[idx]) tentative = orig_rom[idx];
+                        new_rom[idx] = tentative;
+                    }
+                }
+
+                // ---- 解压计算 CRC（无需解密）----
+                u8* f1_decomp = NULL;
+                u8* f2_decomp = NULL;
+                u32 f1_decomp_size = 0, f2_decomp_size = 0;
+
+                f1_decomp_size = decompressLZ77(NULL, fm_parts[0]);
+                f1_decomp = (u8*)malloc(f1_decomp_size);
+                decompressLZ77(f1_decomp, fm_parts[0]);
+
+                f2_decomp_size = decompressLZ77(NULL, fm_parts[1]);
+                f2_decomp = (u8*)malloc(f2_decomp_size);
+                decompressLZ77(f2_decomp, fm_parts[1]);
+
+                // ---- 计算 part12 CRC ----
+                u16 f_crc1 = swiCRC(0xFFFF, (u32*)f1_decomp, (u32)f1_decomp_size);
+                u16 f_part12_crc = swiCRC(f_crc1, (u32*)f2_decomp, (u32)f2_decomp_size);
+
+                free(f1_decomp);
+                free(f2_decomp);
+
+                hdr2.part12_crc16 = f_part12_crc;
+
+                // ---- 更新 ROM 地址字段 ----
+                hdr2.part1_romaddr = new_rom[0] / (1 << (2 + fshift1));
+                hdr2.part2_romaddr = new_rom[1] / (1 << (2 + fshift3));
+
+                // ---- 重写 FlashMe header ----
+                memcpy(fw_data + hdr2_offset, &hdr2, FW_HEADER_SIZE - 0x80);
+
+                // ---- 写入两个 FlashMe 部分 ----
+                for (int i = 0; i < 2; i++) {
+                    memcpy(fw_data + new_rom[i], fm_parts[i], fm_sizes[i]);
+                    printf("%s written at 0x%06X (size 0x%06X)\n",
+                           fm_files[i], new_rom[i], fm_sizes[i]);
+                    free(fm_parts[i]);
+                }
+
+                printf("FlashMe part12 CRC16 updated: 0x%04X\n", f_part12_crc);
+                printf("FlashMe part1_romaddr: 0x%06X\n", new_rom[0]);
+                printf("FlashMe part2_romaddr: 0x%06X\n", new_rom[1]);
             }
         }
 
