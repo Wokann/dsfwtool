@@ -1,12 +1,6 @@
-*.h           text eol=lf
-*.c           text eol=lf
-*.i           text eol=lf
-*.s           text eol=lf
-*.cpp         text eol=lf
-*.txt         text eol=lf
-Makefile      text eol=lf
+* text=auto
 
-# 二进制文件
+*.bin           binary
 *.o           binary
 *.exe         binary
 *.png         binary
