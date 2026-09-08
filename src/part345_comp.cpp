@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdbool.h>
 
 #include "part345_comp.h"
 #include "bitstream.h"
@@ -689,7 +690,6 @@ u32 getCompressedPart345Size(u8 *src) {
     }
 
     u32 effective_size = offset + datadec[1].bitstream.pos;
-    printf("Effective compressed size: %08X bytes\n", effective_size);
 
     // cleanup
     free(datadec[0].table[0]);

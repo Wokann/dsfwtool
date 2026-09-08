@@ -244,13 +244,15 @@ aligned_span = 12 + S0 + S1
 effective_end = distance_offset + ceil(B1 / 8)
 ```
 
-Zero-fill each stream to its aligned size, assemble the 12-byte header, and
-append the primary and distance streams in that order. The first three header
-bytes contain the low 24 bits of aligned_span * 4 in little-endian order, followed
-by 0x80. Write the decompressed length and distance_offset in their specified
-big-endian fields. The encoder returns aligned_span bytes; bytes after
-effective_end are the final 0–3 alignment bytes, distinct from primary-stream
-alignment inside the effective component.
+Zero-fill the in-memory stream areas to their aligned sizes, assemble the
+12-byte header, and append the primary and distance streams in that order. The
+first three header bytes contain the low 24 bits of aligned_span * 4 in
+little-endian order, followed by 0x80. Write the decompressed length and
+distance_offset in their specified big-endian fields. The descriptor keeps the
+aligned span, but the stored component ends at effective_end: bytes after that
+position are only final 0–3 byte construction alignment, not component data.
+This distinction lets a firmware place the next component at its independently
+aligned start without inventing a padded P3/P4/P5 payload.
 
 The exact byte sequence follows from the entire chain: LZ choices determine
 symbols and frequencies; deterministic heap operations determine trees and code
@@ -478,11 +480,12 @@ aligned_span = 12 + S0 + S1
 effective_end = distance_offset + ceil(B1 / 8)
 ```
 
-将每条流以零补到对应的对齐长度，生成 12 字节头部，再依次连接主流和
-距离流。头部前三字节以小端顺序保存 aligned_span * 4 的低 24 位，
+在内存中将每条流以零补到对应的对齐长度，生成 12 字节头部，再依次连接
+主流和距离流。头部前三字节以小端顺序保存 aligned_span * 4 的低 24 位，
 第四字节写入 0x80；解压长度和 distance_offset 按各自规定的大端字段写入。
-编码器返回 aligned_span 字节，effective_end 之后是最后的 0–3 个对齐字节，
-与有效组件内部的主流对齐区域不同。
+描述字仍记录 aligned_span，但实际写入的组件在 effective_end 结束；其后的
+0–3 个字节仅是构造过程中的末尾对齐，并非组件数据。这样，固件可按下一组件
+各自的起始对齐放置数据，而无需为 P3/P4/P5 虚构额外的填充负载。
 
 完整的字节确定过程是：LZ 选择决定符号及频率，确定性的堆操作决定树形和
 码字路径，前序树序列化与高位优先的位打包决定两条流，对齐决定偏移与头部值。
