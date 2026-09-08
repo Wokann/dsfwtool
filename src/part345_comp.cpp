@@ -6,6 +6,10 @@
 #include "bitstream.h"
 #include "tree.h"
 
+#ifndef PART345_LAZY_GAIN
+#define PART345_LAZY_GAIN 1u
+#endif
+
 u32 ror_u32 (u32 val, int bits) {
 	return (val >> bits) | (val << (32 - bits));
 }
@@ -249,61 +253,38 @@ static void vpk_tree_save(PNODE node, BITSTREAM *bs, u32 bitlen) {
 	}
 }
 
+
+/* Equal children select the left child; an equal parent stays in place.
+ * Removing only the first minimum and replacing the second with the parent
+ * preserves the heap ordering observed in all 60 official P345 trees. */
+static void huffman_sift_down(PNODE *heap, u32 count, u32 position) {
+    PNODE value = heap[position];
+    u32 child;
+    while ((child = position * 2) <= count) {
+        if (child < count && heap[child + 1]->weight < heap[child]->weight)
+            child++;
+        if (value->weight <= heap[child]->weight) break;
+        heap[position] = heap[child];
+        position = child;
+    }
+    heap[position] = value;
+}
+
 static PNODE build_tree_from_freq_table(u32 *freq, u32 items) {
-	u32 i, weight, index, bits;
-	PNODE nodes[0x800+0x1000], tree, node1, node2, node;
-	
-	(void)bits;
-	
-	// init
-	memset(&nodes[0], 0, sizeof(nodes));
-	tree = NULL;
-	bits = 0;
-	
-	// create nodes
-	for(i = 0; i < items; i++) {
-		weight = freq[i];
-		if(weight != 0) nodes[i] = node_create(NULL, NULL, i, weight);
-	}
-	
-	// build tree
-	index = items;
-	while(1) {
-		// find 2 nodes with the smallest weight
-		node1 = NULL;
-		node2 = NULL;
-		for(i = 0; i < index; i++) {
-			node = nodes[i];
-			if((!node) || (node->weight == 0)) continue;
-			if(!node1) {
-				node1 = node;
-			}
-			else {
-				if(!node2) {
-					node2 = node;
-				}
-				else {
-					if((node->weight < node1->weight) || (node->weight < node2->weight)) {
-						if(node1->weight > node2->weight) node1 = node; else node2 = node;  
-					}
-				}
-			}
-		}
-		
-		if((node1) && (node2)) {
-			// create parent node
-			nodes[index++] = node_create(node1, node2, 0, node1->weight + node2->weight);
-			node1->weight = 0;
-			node2->weight = 0;
-		}
-		else {
-			// get root node
-			if(node1 != NULL) tree = node1; else tree = node2;
-			break;
-		}
-	}
-	
-	return tree;
+    PNODE heap[0x801];
+    u32 count = 0, i;
+    for (i = 0; i < items; i++)
+        if (freq[i]) heap[++count] = node_create(NULL, NULL, i, freq[i]);
+    for (i = count / 2; i; i--) huffman_sift_down(heap, count, i);
+    while (count > 1) {
+        PNODE first = heap[1], second;
+        heap[1] = heap[count--];
+        huffman_sift_down(heap, count, 1);
+        second = heap[1];
+        heap[1] = node_create(first, second, 0, first->weight + second->weight);
+        huffman_sift_down(heap, count, 1);
+    }
+    return count ? heap[1] : NULL;
 }
 
 static void tree_get_depth_and_path_for_value( PNODE node, u32 value, u32 depth, u32 path, int *depthx, int *pathx) {
@@ -363,7 +344,7 @@ static u32 stream_read_bits(u32 bits, u32 sel) {
 	return bitstream_read(&datadec[sel].bitstream, bits);
 }
 
-static u32 make_tree(u8 *src, u32 sel) {
+static u32 make_tree(u32 sel) {
 	u32 r0, r2, pos;
 	u16 temp[256], r8, r9;
 	
@@ -418,7 +399,7 @@ u32 decompress_part345(u8 *dst, u8 *src) {
 	datadec[0].bitlen = 9;
 	datadec[0].table[0] = (u32*)malloc(0x1000);
 	datadec[0].table[1] = (u32*)malloc(0x1000);
-	make_tree(src, 0);
+	make_tree(0);
 	
 	// init 2nd stream (contains lz distance values)
 	bitstream_clear(&datadec[1].bitstream);
@@ -429,7 +410,7 @@ u32 decompress_part345(u8 *dst, u8 *src) {
 	datadec[1].bitlen = 11;
 	datadec[1].table[0] = (u32*)malloc(0x4000);
 	datadec[1].table[1] = (u32*)malloc(0x4000);
-	make_tree(src, 1);
+	make_tree(1);
 	
 	r0 = sizedec;
 	posdst = 0;
@@ -469,25 +450,69 @@ u32 decompress_part345(u8 *dst, u8 *src) {
 static u32 lz_memcmp(u8 *mem1, u8 *mem2, u32 max) {
 	u32 ret;
 	ret = 0;
-	while((*mem1++ == *mem2++) && (max-- > 0)) ret++;
+	while(max != 0 && *mem1 == *mem2) {
+		mem1++;
+		mem2++;
+		max--;
+		ret++;
+	}
 	return ret;
 }
 
 static void lz_search(u8 *src, u32 pos, u32 srcmax, u32 *back, u32 *length) {
-	u32 i, len;
+	u32 i, len, max_length;
 	
 	// init
 	*back = 0;
 	*length = 0;
 	
+	max_length = srcmax - pos;
+	if(max_length > 0x102) max_length = 0x102;
 	for(i = 0; i < 0x800; i++) {
 		if(i < pos) {
-			len = lz_memcmp(src + pos, src + pos - i - 1, srcmax - pos);
-			if((len > 2) && (len > *length)) {
+			len = lz_memcmp(src + pos, src + pos - i - 1, max_length);
+			if((len > 2) && (len >= *length)) {
 				*length = len;
 				*back = i + 1; 
 			}
 		}
+	}
+}
+
+static void lz_search_lazy(u8 *src, u32 pos, u32 srcmax, u32 *back, u32 *length, bool *commit_match) {
+	u32 next_back, next_length;
+	lz_search(src, pos, srcmax, back, length);
+	if(*length > 0x102) *length = 0x102;
+	if(*commit_match) {
+		*commit_match = false;
+		return;
+	}
+	if(*back == 0 || pos + 1 >= srcmax) return;
+	lz_search(src, pos + 1, srcmax, &next_back, &next_length);
+	if(next_length > 0x102) next_length = 0x102;
+	if(next_back != 0 && next_length > *length + PART345_LAZY_GAIN) {
+		*back = 0;
+		*length = 0;
+		*commit_match = true;
+	}
+}
+
+static void ensure_decodable_tree(u32 *freq, u32 items) {
+	u32 i, used, first;
+	used = 0;
+	first = items;
+	for(i = 0; i < items; i++) {
+		if(freq[i] != 0) {
+			if(first == items) first = i;
+			used++;
+		}
+	}
+	if(used == 0) {
+		freq[0] = 1;
+		freq[1] = 1;
+	}
+	else if(used == 1) {
+		freq[first == 0 ? 1 : 0] = 1;
 	}
 }
 
@@ -503,11 +528,15 @@ static u32 swap32(u32 value) {
 
 u32 compress_part345(u8 *dst, u8 *src, u32 size) {
 	u32 i, back, length;
+	bool commit_match;
 	u32 *freq[2];
 	PNODE tree[2];
 	PDPV_TABLE dpv[2];
 	BITSTREAM bs[2], bsdst;
-	u32 bitlen[2], ret;
+	u32 bitlen[2], ret, stream_capacity;
+
+	if(dst == NULL || src == NULL || size == 0 || size > 0xFFFFFFu) return 0;
+	stream_capacity = size * 2u + 0x10000u;
 	
 	bitlen[0] = 9;
 	bitlen[1] = 11;
@@ -515,7 +544,11 @@ u32 compress_part345(u8 *dst, u8 *src, u32 size) {
 	// init bitstream
 	for(i = 0; i < 2; i++) {
 		bitstream_clear(&bs[i]);
-		bs[i].ptr = (u8*)malloc(256 * 1024);
+		bs[i].ptr = (u8*)malloc(stream_capacity);
+		if(bs[i].ptr == NULL) {
+			while(i != 0) free(bs[--i].ptr);
+			return 0;
+		}
 	}
 	
 	// alloc freq table
@@ -531,8 +564,9 @@ u32 compress_part345(u8 *dst, u8 *src, u32 size) {
 	
 	// lz compress (part 1)
 	i = 0;
+	commit_match = false;
 	while(i < size) {
-		lz_search(src, i, size, &back, &length);
+		lz_search_lazy(src, i, size, &back, &length, &commit_match);
 		if(back != 0) {
 			if(length > 0x102) length = 0x102;
 			*(freq[1] + back - 1) += 1;
@@ -546,6 +580,7 @@ u32 compress_part345(u8 *dst, u8 *src, u32 size) {
 			i++;
 		}
 	}
+	for(i = 0; i < 2; i++) ensure_decodable_tree(freq[i], (1u << bitlen[i]));
 	
 	// tree
 	for(i = 0; i < 2; i++) {
@@ -560,8 +595,9 @@ u32 compress_part345(u8 *dst, u8 *src, u32 size) {
 	
 	// lz compress (part 2)
 	i = 0;
+	commit_match = false;
 	while(i < size) {
-		lz_search(src, i, size, &back, &length);
+		lz_search_lazy(src, i, size, &back, &length, &commit_match);
 		if(back != 0) {
 			if(length > 0x102) length = 0x102;
 			bitstream_write(&bs[1], (dpv[1] + back - 1)->depth, (dpv[1] + back - 1)->path);
@@ -618,7 +654,7 @@ u32 getCompressedPart345Size(u8 *src) {
     datadec[0].bitlen = 9;
     datadec[0].table[0] = (u32*)malloc(0x1000);
     datadec[0].table[1] = (u32*)malloc(0x1000);
-    make_tree(src, 0);
+    make_tree(0);
 
     // init 2nd stream (contains lz distance values)
     bitstream_clear(&datadec[1].bitstream);
@@ -630,7 +666,7 @@ u32 getCompressedPart345Size(u8 *src) {
     datadec[1].bitlen = 11;
     datadec[1].table[0] = (u32*)malloc(0x4000);
     datadec[1].table[1] = (u32*)malloc(0x4000);
-    make_tree(src, 1);
+    make_tree(1);
 
     posdst = 0;
     while(posdst < sizedec) {

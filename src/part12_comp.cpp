@@ -17,17 +17,10 @@ u32 decompressLZ77(u8 *dst,u8 *src) {
     if (decompSize <= 0) return 0;
 	if(!dst)  return decompSize;
 
-    u8 *tempBuf = (u8 *)malloc(decompSize);
-    if (!tempBuf) return -1;
-
     size_t inPos = 4;
     size_t outPos = 0;
     u8 flags = 0;
     int flagBits = 0;
-
-    u16 halfWord = 0;
-    int halfFlag = 0;
-    size_t halfAddr = 0;
 
     while (outPos < (size_t)decompSize) {
         if (flagBits == 0) {
@@ -37,17 +30,7 @@ u32 decompressLZ77(u8 *dst,u8 *src) {
 
         if ((flags & 0x80) == 0) {
             u8 val = src[inPos++];
-            tempBuf[outPos++] = val;
-
-            if (!halfFlag) {
-                halfWord = val;
-                halfAddr = outPos - 1;
-                halfFlag = 1;
-            } else {
-                halfWord |= (val << 8);
-                *(u16 *)(dst + halfAddr) = halfWord;
-                halfFlag = 0;
-            }
+            dst[outPos++] = val;
 
         } else {
             u8 b1 = src[inPos++];
@@ -57,18 +40,8 @@ u32 decompressLZ77(u8 *dst,u8 *src) {
 
             for (int k = 0; k < length && outPos < (size_t)decompSize; k++) {
                 int srcIdx = (int)outPos - (displacement + 1);
-                u8 val = (srcIdx >= 0) ? tempBuf[srcIdx] : 0;
-                tempBuf[outPos++] = val;
-
-                if (!halfFlag) {
-                    halfWord = val;
-                    halfAddr = outPos - 1;
-                    halfFlag = 1;
-                } else {
-                    halfWord |= (val << 8);
-                    *(u16 *)(dst + halfAddr) = halfWord;
-                    halfFlag = 0;
-                }
+                u8 val = (srcIdx >= 0) ? dst[srcIdx] : 0;
+                dst[outPos++] = val;
             }
         }
 
@@ -76,11 +49,6 @@ u32 decompressLZ77(u8 *dst,u8 *src) {
         flagBits--;
     }
 
-    if (halfFlag) {
-        *(u16 *)(dst + halfAddr) = halfWord;
-    }
-
-    free(tempBuf);
     return decompSize;
 }
 
@@ -110,7 +78,7 @@ u32 getCompressedLZ77Size(u8 *src) {
             outPos++;
         } else {
             u8 b1 = src[inPos++];
-            u8 b2 = src[inPos++];
+            inPos++;
             int length = (b1 >> 4) + 3;
             outPos += length;
         }
@@ -119,7 +87,7 @@ u32 getCompressedLZ77Size(u8 *src) {
         flagBits--;
     }
 
-    printf("Effective compressed size: %08X bytes\n", inPos);
+    printf("Effective compressed size: %08X bytes\n", (unsigned int)inPos);
     return (int)inPos;
 }
 
@@ -183,7 +151,11 @@ static u8 hashFind(HashWindow *win, const u8 *ptr, int remain, u16 *offset) {
         const u8 *p1 = search + 3, *p2 = ptr + 3;
         while (len < MAX_MATCH && p2 < ptr + remain && *p1 == *p2) { p1++; p2++; len++; }
 
-        if (len > bestLen) { bestLen = len; bestOffset = (u16)(ptr - search); if (bestLen == MAX_MATCH) break; }
+        // Firmware streams prefer the most recent occurrence when several
+        // back-references encode the same longest match.  The candidate list
+        // is visited from oldest to newest, so equal lengths must replace the
+        // previous candidate.
+        if (len >= bestLen) { bestLen = len; bestOffset = (u16)(ptr - search); }
         idx = win->next[idx];
     }
 
@@ -194,7 +166,7 @@ static u8 hashFind(HashWindow *win, const u8 *ptr, int remain, u16 *offset) {
 }
 
 u32 compressLZ77(u8 *dst, u8 *src, u32 size) {
-    if (!src || !dst || size <= 0) return -1;
+    if (!src || !dst || size == 0 || size > 0xFFFFFFu) return 0;
 
     HashWindow win;
     hashInit(&win);
@@ -234,4 +206,3 @@ u32 compressLZ77(u8 *dst, u8 *src, u32 size) {
 
     return outPos;
 }
-
