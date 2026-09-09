@@ -1,28 +1,29 @@
 
-#include <stdio.h>
-#include <malloc.h>
 #include <string.h>
 
 #include "nds_types.h"
 #include "part12_comp.h"
 
-u32 decompressLZ77(u8 *dst,u8 *src) {
-    u32 header = src[0] | (src[1]<<8) | (src[2]<<16) | (src[3]<<24);
-	int compressionType = (header & 0xF0) >> 4;
-	if (compressionType != COMPRESSION_TYPE_LZ77) {
-            printf("Cannot decompress type %d\n", compressionType);
-            return 0;
-	}
-    int decompSize = header >> 8;
-    if (decompSize <= 0) return 0;
-	if(!dst)  return decompSize;
+#define LZ_HEADER 0x10u
+#define WINDOW_SIZE 4096
+#define MAX_MATCH 18
+
+u32 decompressLZ77(u8 *dst, const u8 *src) {
+    u32 header;
+    u32 decompSize;
+    if (src == NULL) return 0;
+    header = (u32)src[0] | ((u32)src[1] << 8) | ((u32)src[2] << 16) | ((u32)src[3] << 24);
+	if (((header & 0xF0u) >> 4) != (LZ_HEADER >> 4)) return 0;
+    decompSize = header >> 8;
+    if (decompSize == 0) return 0;
+	if(!dst) return decompSize;
 
     size_t inPos = 4;
     size_t outPos = 0;
     u8 flags = 0;
     int flagBits = 0;
 
-    while (outPos < (size_t)decompSize) {
+    while (outPos < decompSize) {
         if (flagBits == 0) {
             flags = src[inPos++];
             flagBits = 8;
@@ -38,7 +39,7 @@ u32 decompressLZ77(u8 *dst,u8 *src) {
             int length = (b1 >> 4) + 3;
             int displacement = ((b1 & 0xF) << 8) | b2;
 
-            for (int k = 0; k < length && outPos < (size_t)decompSize; k++) {
+            for (int k = 0; k < length && outPos < decompSize; k++) {
                 int srcIdx = (int)outPos - (displacement + 1);
                 u8 val = (srcIdx >= 0) ? dst[srcIdx] : 0;
                 dst[outPos++] = val;
@@ -52,23 +53,21 @@ u32 decompressLZ77(u8 *dst,u8 *src) {
     return decompSize;
 }
 
-u32 getCompressedLZ77Size(u8 *src) {
-    u32 header = src[0] | (src[1]<<8) | (src[2]<<16) | (src[3]<<24);
-	int compressionType = (header & 0xF0) >> 4;
-	if (compressionType != COMPRESSION_TYPE_LZ77) {
-            printf("Cannot decompress type %d\n", compressionType);
-            return 0;
-	}
-    int decompSize = header >> 8;
-    if (decompSize <= 0) return 0;
-    if (!src) return -1;
+u32 getCompressedLZ77Size(const u8 *src) {
+    u32 header;
+    u32 decompSize;
+    if (src == NULL) return 0;
+    header = (u32)src[0] | ((u32)src[1] << 8) | ((u32)src[2] << 16) | ((u32)src[3] << 24);
+	if (((header & 0xF0u) >> 4) != (LZ_HEADER >> 4)) return 0;
+    decompSize = header >> 8;
+    if (decompSize == 0) return 0;
 
     size_t inPos = 4;
     size_t outPos = 0;
     u8 flags = 0;
     int flagBits = 0;
 
-    while (outPos < (size_t)decompSize) {
+    while (outPos < decompSize) {
         if (flagBits == 0) {
             flags = src[inPos++];
             flagBits = 8;
@@ -87,14 +86,9 @@ u32 getCompressedLZ77Size(u8 *src) {
         flagBits--;
     }
 
-    printf("Effective compressed size: %08X bytes\n", (unsigned int)inPos);
-    return (int)inPos;
+    return (u32)inPos;
 }
 
-
-#define LZ_HEADER 0x10
-#define WINDOW_SIZE 4096
-#define MAX_MATCH 18
 
 typedef struct {
     s16 next[WINDOW_SIZE];
@@ -165,7 +159,7 @@ static u8 hashFind(HashWindow *win, const u8 *ptr, int remain, u16 *offset) {
     return bestLen;
 }
 
-u32 compressLZ77(u8 *dst, u8 *src, u32 size) {
+u32 compressLZ77(u8 *dst, const u8 *src, u32 size) {
     if (!src || !dst || size == 0 || size > 0xFFFFFFu) return 0;
 
     HashWindow win;

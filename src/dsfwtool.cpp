@@ -37,31 +37,13 @@
  */
 
 #define DSFWTOOL_VERSION "1.0"
-#define HEADER_BYTES (FW_HEADER_SIZE - 0x80u)
-#define CAPACITY_UNIT 0x40000u
-#define FLASHME_TRAILER 0x980u
+#define HEADER_BYTES FW_HEADER_DATA_SIZE
+#define CAPACITY_UNIT FW_CAPACITY_UNIT
+#define FLASHME_TRAILER FW_FLASHME_TRAILER_SIZE
 #define PATH_BUFFER_SIZE 2048
 #define MAX_HEADER_EDITS 32
 #define MAX_RANGES 10
 #define MAX_RELOCATED_COMPONENTS 7
-
-#if defined(__GNUC__) || defined(__clang__)
-#define DSFWTOOL_UNUSED __attribute__((unused))
-#else
-#define DSFWTOOL_UNUSED
-#endif
-
-enum {
-    SELECT_HEADER = 1u << 0,
-    SELECT_P1 = 1u << 1,
-    SELECT_P2 = 1u << 2,
-    SELECT_P3 = 1u << 3,
-    SELECT_P4 = 1u << 4,
-    SELECT_P5 = 1u << 5,
-    SELECT_FLASHME = 1u << 6,
-    SELECT_PRIMARY = SELECT_P1 | SELECT_P2 | SELECT_P3 | SELECT_P4 | SELECT_P5,
-    SELECT_ALL = SELECT_HEADER | SELECT_PRIMARY | SELECT_FLASHME
-};
 
 typedef struct {
     u8 *data;
@@ -81,13 +63,6 @@ typedef struct {
     u32 flashme_effective_sizes[2];
     u32 flashme_alignments[2];
 } FirmwareLayout;
-
-typedef struct {
-    int has_image_size;
-    u32 image_size;
-    int has_flashme_header_offset;
-    u32 flashme_header_offset;
-} LayoutMetadata;
 
 typedef struct {
     u16 offset;
@@ -273,26 +248,6 @@ static int ensure_parent_directory(const char *path)
     return mkdir_recursive(parent);
 }
 
-/* Compatibility helpers for the legacy implementation below. */
-static DSFWTOOL_UNUSED int file_exists(const char *path)
-{
-    return access(path, 0) == 0;
-}
-
-static int join_path(char *output, size_t output_size, const char *directory, const char *name)
-{
-    size_t directory_length = strlen(directory);
-    const char *separator = (directory_length != 0 &&
-                             (directory[directory_length - 1] == '/' || directory[directory_length - 1] == '\\'))
-                                ? ""
-                                : "/";
-    if (snprintf(output, output_size, "%s%s%s", directory, separator, name) >= (int)output_size) {
-        print_error("combined path is too long: '%s' + '%s'", directory, name);
-        return -1;
-    }
-    return 0;
-}
-
 static int write_file(const char *path, const u8 *data, size_t size)
 {
     FILE *file;
@@ -396,16 +351,6 @@ static int parse_size(const char *text, u32 *value, int *is_auto)
     }
     *value = (u32)result;
     return 0;
-}
-
-static int equal_ci(const char *left, const char *right)
-{
-    while (*left && *right) {
-        if (tolower((unsigned char)*left) != tolower((unsigned char)*right)) return 0;
-        left++;
-        right++;
-    }
-    return *left == '\0' && *right == '\0';
 }
 
 static u32 primary_part_offset(const FW_HEADER *header, int index)
@@ -514,12 +459,11 @@ static int p12_stream_size(const u8 *compressed, u32 available, u32 *effective)
 static int effective_p12_size(const u8 *encrypted, u32 span, u32 idcode, u32 *effective)
 {
     Blob decrypted;
-    u32 padded;
     int decrypted_size;
 
-    if (span < 4 || round_up_u32(span, 8, &padded) != 0) return -1;
+    if (span < 4) return -1;
     blob_init(&decrypted);
-    if (blob_alloc(&decrypted, padded) != 0) return -1;
+    if (blob_alloc(&decrypted, span) != 0) return -1;
     init_keycode(idcode, 2, 0x0C);
     decrypted_size = decrypt_buffer(encrypted, decrypted.data, (int)span);
     if (decrypted_size < 4 || decrypted.data[0] != 0x10) {
@@ -664,11 +608,6 @@ static void fprint_ascii_identifier(FILE *file, const u8 identifier[4])
     }
 }
 
-static DSFWTOOL_UNUSED void print_ascii_identifier(const u8 identifier[4])
-{
-    fprint_ascii_identifier(stdout, identifier);
-}
-
 static void fprint_header_fields(FILE *file, const FW_HEADER *header, const char *label)
 {
     const u8 *bytes = (const u8 *)header;
@@ -694,18 +633,13 @@ static void fprint_header_fields(FILE *file, const FW_HEADER *header, const char
         fprintf(file, "  Wi-Fi config CRC: 0x%04X  length=0x%04X (not declared)\n",
                 config_checksum, config_length);
     } else if ((u32)config_length <= HEADER_BYTES - 0x2Cu) {
-        u16 calculated = swiCRC(0, (u32 *)(bytes + 0x2C), config_length);
+        u16 calculated = swiCRC(0, bytes + 0x2C, config_length);
         fprintf(file, "  Wi-Fi config CRC: 0x%04X  length=0x%04X (%s)\n",
                 config_checksum, config_length, calculated == config_checksum ? "valid" : "mismatch");
     } else {
         fprintf(file, "  Wi-Fi config CRC: 0x%04X  length=0x%04X (out of range)\n",
                 config_checksum, config_length);
     }
-}
-
-static DSFWTOOL_UNUSED void print_header_fields(const FW_HEADER *header, const char *label)
-{
-    fprint_header_fields(stdout, header, label);
 }
 
 static void fprint_layout(FILE *file, const char *path, const Blob *image, const FirmwareLayout *layout)
@@ -740,86 +674,6 @@ static void fprint_layout(FILE *file, const char *path, const Blob *image, const
 static void print_layout(const char *path, const Blob *image, const FirmwareLayout *layout)
 {
     fprint_layout(stdout, path, image, layout);
-}
-
-static DSFWTOOL_UNUSED int parse_component_selection(const char *text, unsigned int *selection)
-{
-    char buffer[256];
-    char *token;
-    unsigned int result = 0;
-
-    if (snprintf(buffer, sizeof(buffer), "%s", text) >= (int)sizeof(buffer)) {
-        print_error("component selection is too long");
-        return -1;
-    }
-    token = strtok(buffer, ",");
-    while (token != NULL) {
-        if (equal_ci(token, "all")) result |= SELECT_ALL;
-        else if (equal_ci(token, "header")) result |= SELECT_HEADER;
-        else if (equal_ci(token, "p1") || equal_ci(token, "part1") || equal_ci(token, "arm9boot")) result |= SELECT_P1;
-        else if (equal_ci(token, "p2") || equal_ci(token, "part2") || equal_ci(token, "arm7boot")) result |= SELECT_P2;
-        else if (equal_ci(token, "p3") || equal_ci(token, "part3") || equal_ci(token, "arm9gui")) result |= SELECT_P3;
-        else if (equal_ci(token, "p4") || equal_ci(token, "part4") || equal_ci(token, "arm7wifi")) result |= SELECT_P4;
-        else if (equal_ci(token, "p5") || equal_ci(token, "part5") || equal_ci(token, "gfx")) result |= SELECT_P5;
-        else if (equal_ci(token, "flashme")) result |= SELECT_FLASHME;
-        else {
-            print_error("unknown component selector '%s'", token);
-            return -1;
-        }
-        token = strtok(NULL, ",");
-    }
-    if (result == 0) {
-        print_error("component selection is empty");
-        return -1;
-    }
-    *selection = result;
-    return 0;
-}
-
-static DSFWTOOL_UNUSED int write_layout_metadata(const char *directory, size_t image_size, const FirmwareLayout *layout)
-{
-    char path[PATH_BUFFER_SIZE];
-    FILE *file;
-    if (join_path(path, sizeof(path), directory, "fwtool.meta") != 0) return -1;
-    if (ensure_parent_directory(path) != 0) return -1;
-    file = fopen(path, "wb");
-    if (file == NULL) {
-        print_error("cannot create '%s'", path);
-        return -1;
-    }
-    fprintf(file, "FWTOOL-META 1\n");
-    fprintf(file, "image_size=0x%08lX\n", (unsigned long)image_size);
-    fprintf(file, "flashme_header_offset=");
-    if (layout->has_flashme) fprintf(file, "0x%08X\n", layout->flashme_header_offset);
-    else fprintf(file, "none\n");
-    if (fclose(file) != 0) {
-        print_error("cannot close '%s'", path);
-        return -1;
-    }
-    return 0;
-}
-
-static DSFWTOOL_UNUSED void read_layout_metadata(const char *path, LayoutMetadata *metadata)
-{
-    FILE *file;
-    char line[128];
-    memset(metadata, 0, sizeof(*metadata));
-    file = fopen(path, "rb");
-    if (file == NULL) return;
-    while (fgets(line, sizeof(line), file) != NULL) {
-        char *newline = strpbrk(line, "\r\n");
-        u32 value;
-        if (newline != NULL) *newline = '\0';
-        if (strncmp(line, "image_size=", 11) == 0 && parse_u32(line + 11, &value) == 0) {
-            metadata->has_image_size = 1;
-            metadata->image_size = value;
-        } else if (strncmp(line, "flashme_header_offset=", 23) == 0 &&
-                   strcmp(line + 23, "none") != 0 && parse_u32(line + 23, &value) == 0) {
-            metadata->has_flashme_header_offset = 1;
-            metadata->flashme_header_offset = value;
-        }
-    }
-    fclose(file);
 }
 
 static int add_raw_header_edit(HeaderEdits *edits, u16 offset, u8 width, u32 value)
@@ -998,7 +852,7 @@ static int update_header_config_checksum(Blob *header_blob)
         print_error("header Wi-Fi configuration length 0x%04X exceeds the exported header", config_length);
         return -1;
     }
-    checksum = swiCRC(0, (u32 *)(header_blob->data + 0x2C), config_length);
+    checksum = swiCRC(0, header_blob->data + 0x2C, config_length);
     write_le16(header_blob->data + 0x2A, checksum);
     return 0;
 }
@@ -1023,39 +877,6 @@ static int read_header_file(const char *path, Blob *header)
     return 0;
 }
 
-static DSFWTOOL_UNUSED int read_aligned_component(const char *path, u32 alignment, int require_eight_byte_blocks, Blob *component)
-{
-    Blob raw;
-    u32 aligned_size;
-
-    blob_init(&raw);
-    blob_init(component);
-    if (read_file(path, &raw) != 0) return -1;
-    if (raw.size == 0 || raw.size > UINT_MAX) {
-        print_error("component '%s' is empty or too large", path);
-        blob_free(&raw);
-        return -1;
-    }
-    if (require_eight_byte_blocks && (raw.size & 7u) != 0) {
-        print_error("encrypted component '%s' is not 8-byte aligned", path);
-        blob_free(&raw);
-        return -1;
-    }
-    if (round_up_u32((u32)raw.size, alignment, &aligned_size) != 0) {
-        print_error("component '%s' is too large to align", path);
-        blob_free(&raw);
-        return -1;
-    }
-    if (blob_alloc(component, aligned_size) != 0) {
-        blob_free(&raw);
-        return -1;
-    }
-    memset(component->data, 0, component->size);
-    memcpy(component->data, raw.data, raw.size);
-    blob_free(&raw);
-    return 0;
-}
-
 static int decode_p12(const u8 *compressed, size_t compressed_size, Blob *plain)
 {
     u32 decompressed_size;
@@ -1073,7 +894,7 @@ static int decode_p12(const u8 *compressed, size_t compressed_size, Blob *plain)
         return -1;
     }
     if (blob_alloc(plain, decompressed_size) != 0) return -1;
-    actual_size = decompressLZ77(plain->data, (u8 *)compressed);
+    actual_size = decompressLZ77(plain->data, compressed);
     if (actual_size != decompressed_size) {
         print_error("P1/P2 decompressor returned an unexpected size");
         blob_free(plain);
@@ -1110,40 +931,64 @@ static int decode_p345(const u8 *compressed, size_t compressed_size, Blob *plain
 
 static int decrypt_p12(const FW_HEADER *header, const Blob *encrypted, Blob *decrypted)
 {
-    u32 padded_size;
+    u32 encrypted_size;
+    u32 effective_size;
     int output_size;
 
     blob_init(decrypted);
     if (encrypted->size == 0 || encrypted->size > UINT_MAX ||
-        round_up_u32((u32)encrypted->size, 8, &padded_size) != 0) {
-        print_error("invalid encrypted P1/P2 component size");
+        (encrypted->size & 7u) != 0) {
+        print_error("encrypted P1/P2 input must be a non-zero multiple of 8 bytes");
         return -1;
     }
-    if (blob_alloc(decrypted, padded_size) != 0) return -1;
+    encrypted_size = (u32)encrypted->size;
+    if (blob_alloc(decrypted, encrypted_size) != 0) return -1;
     init_keycode(read_le32(header->fw_identifier), 2, 0x0C);
-    output_size = decrypt_buffer(encrypted->data, decrypted->data, (int)encrypted->size);
-    if (output_size < 0 || (u32)output_size != padded_size) {
+    output_size = decrypt_buffer(encrypted->data, decrypted->data, (int)encrypted_size);
+    if (output_size < 0 || (u32)output_size != encrypted_size) {
         print_error("P1/P2 decryption failed");
         blob_free(decrypted);
         return -1;
     }
+    /* Decrypt every supplied complete block before examining the stream.  The
+       exported P12 layer is then trimmed only after a successful
+       post-decryption LZ77 parse; no caller may pre-trim ciphertext to the
+       effective stream size. */
+    if (p12_stream_size(decrypted->data, encrypted_size, &effective_size) != 0) {
+        print_error("P1/P2 decryption input is invalid or does not match the supplied header");
+        blob_free(decrypted);
+        return -1;
+    }
+    decrypted->size = effective_size;
     return 0;
 }
 
 static int encrypt_p12(const FW_HEADER *header, const Blob *compressed, Blob *encrypted)
 {
+    u32 effective_size;
+    u32 input_size;
     u32 padded_size;
     int output_size;
 
     blob_init(encrypted);
     if (compressed->size == 0 || compressed->size > UINT_MAX ||
-        round_up_u32((u32)compressed->size, 8, &padded_size) != 0) {
+        p12_stream_size(compressed->data, (u32)compressed->size, &effective_size) != 0) {
         print_error("invalid P1/P2 compressed component size");
+        return -1;
+    }
+    input_size = (u32)compressed->size;
+    if (round_up_u32(input_size, 8, &padded_size) != 0) {
+        print_error("P1/P2 encryption size cannot be aligned to 8 bytes");
         return -1;
     }
     if (blob_alloc(encrypted, padded_size) != 0) return -1;
     init_keycode(read_le32(header->fw_identifier), 2, 0x0C);
-    output_size = encrypt_buffer(compressed->data, encrypted->data, (int)compressed->size);
+    /* p12_stream_size() validates the logical prefix, but intentionally does
+       not shorten the caller's input.  A fully aligned P12 buffer may carry
+       an explicitly supplied official tail; encrypt_buffer() preserves all
+       supplied bytes and constructs official KEY1-derived padding only for
+       a partial final block, before encrypting it. */
+    output_size = encrypt_buffer(compressed->data, encrypted->data, (int)input_size);
     if (output_size < 0 || (u32)output_size != padded_size) {
         print_error("P1/P2 encryption failed");
         blob_free(encrypted);
@@ -1242,41 +1087,16 @@ static int calculate_primary_crcs(const FW_HEADER *header, Blob parts[5],
         }
     }
 
-    crc = swiCRC(0xFFFF, (u32 *)plain[0].data, (u32)plain[0].size);
-    *part12_crc = swiCRC(crc, (u32 *)plain[1].data, (u32)plain[1].size);
-    crc = swiCRC(0xFFFF, (u32 *)plain[2].data, (u32)plain[2].size);
-    *part34_crc = swiCRC(crc, (u32 *)plain[3].data, (u32)plain[3].size);
-    *part5_crc = swiCRC(0xFFFF, (u32 *)plain[4].data, (u32)plain[4].size);
+    crc = swiCRC(0xFFFF, plain[0].data, (u32)plain[0].size);
+    *part12_crc = swiCRC(crc, plain[1].data, (u32)plain[1].size);
+    crc = swiCRC(0xFFFF, plain[2].data, (u32)plain[2].size);
+    *part34_crc = swiCRC(crc, plain[3].data, (u32)plain[3].size);
+    *part5_crc = swiCRC(0xFFFF, plain[4].data, (u32)plain[4].size);
     result = 0;
 
 cleanup:
     for (i = 0; i < 2; i++) blob_free(&decrypted[i]);
     for (i = 0; i < 5; i++) blob_free(&plain[i]);
-    return result;
-}
-
-static DSFWTOOL_UNUSED int calculate_flashme_crc(Blob parts[2], u16 *part12_crc)
-{
-    Blob plain[2];
-    u16 first_crc;
-    int i;
-    int result = -1;
-
-    blob_init(&plain[0]);
-    blob_init(&plain[1]);
-    for (i = 0; i < 2; i++) {
-        if (decode_p12(parts[i].data, parts[i].size, &plain[i]) != 0) {
-            print_error("%s cannot be decompressed", flashme_part_names[i]);
-            goto cleanup;
-        }
-    }
-    first_crc = swiCRC(0xFFFF, (u32 *)plain[0].data, (u32)plain[0].size);
-    *part12_crc = swiCRC(first_crc, (u32 *)plain[1].data, (u32)plain[1].size);
-    result = 0;
-
-cleanup:
-    blob_free(&plain[0]);
-    blob_free(&plain[1]);
     return result;
 }
 
@@ -1312,22 +1132,6 @@ static int build_relocated_positions_aligned(const u32 *original_offsets, const 
         }
     }
     return 0;
-}
-
-static DSFWTOOL_UNUSED int build_relocated_positions(const u32 *original_offsets, const Blob *parts,
-                                     int count, u32 *new_offsets)
-{
-    u32 alignments[MAX_RELOCATED_COMPONENTS];
-    u32 reserved_sizes[MAX_RELOCATED_COMPONENTS];
-    int i;
-    if (count <= 0 || count > MAX_RELOCATED_COMPONENTS) return -1;
-    for (i = 0; i < count; i++) {
-        alignments[i] = 1;
-        if (parts[i].size > UINT_MAX) return -1;
-        reserved_sizes[i] = (u32)parts[i].size;
-    }
-    return build_relocated_positions_aligned(original_offsets, alignments, reserved_sizes,
-                                             count, new_offsets);
 }
 
 /* FlashMe components are physically interleaved with P1--P5.  Rebuilding
@@ -1434,27 +1238,11 @@ static int add_firmware_range(FirmwareRange ranges[MAX_RANGES], int *count,
     return 0;
 }
 
-static DSFWTOOL_UNUSED int max_component_end(const u32 *offsets, const Blob *parts, int count, u32 *end)
-{
-    int i;
-    *end = HEADER_BYTES;
-    for (i = 0; i < count; i++) {
-        u32 component_end;
-        if (parts[i].size > UINT_MAX - offsets[i]) {
-            print_error("component size overflows the firmware address space");
-            return -1;
-        }
-        component_end = offsets[i] + (u32)parts[i].size;
-        if (component_end > *end) *end = component_end;
-    }
-    return 0;
-}
-
 static void print_usage(void)
 {
     printf("dsfwtool v%s - Nintendo DS firmware toolkit\n", DSFWTOOL_VERSION);
     printf("\n");
-    printf("All -x and -c artifacts are explicit files; no directory or manifest mode exists.\n");
+    printf("Output paths may include new parent directories, which are created automatically.\n");
     printf("\n");
     printf("Information:\n");
     printf("  dsfwtool -i FIRMWARE.bin [-o REPORT.txt]\n");
@@ -1473,12 +1261,13 @@ static void print_usage(void)
     printf("      -p1 [-encrypt | -comp -encrypt] FILE\n");
     printf("      -p2 [-encrypt | -comp -encrypt] FILE\n");
     printf("      -p3 [-comp] FILE -p4 [-comp] FILE -p5 [-comp] FILE\n");
-    printf("      [-s 256K|512K|1M|auto] [-b BASE.bin] [--fill 00|FF]\n");
+    printf("      [-s 256K|512K|1M|auto] [--fill 00|FF]\n");
     printf("  P1/P2 with no modifier are already encrypted P12 streams.  -encrypt\n");
     printf("  encrypts an already compressed P12 stream; -comp -encrypt compresses\n");
     printf("  plain data before encryption.  P3/P4/P5 -comp uses P345 compression.\n");
-    printf("  -b preserves non-component bytes from an explicit base image.  Without\n");
-    printf("  -b, unused bytes are filled with FF by default (override with --fill).\n");
+    printf("  P3/P4/P5 effective streams are zero-padded through the next 8-byte boundary\n");
+    printf("  while assembling the image; that padding is not part of an exported component.\n");
+    printf("  Unused output bytes are filled with FF by default (override with --fill).\n");
     printf("\n");
     printf("Independent component operations:\n");
     printf("  dsfwtool -p1 -comp INPUT.bin -o OUTPUT.bin\n");
@@ -1491,14 +1280,15 @@ static void print_usage(void)
     printf("  dsfwtool -p3 -uncomp INPUT.bin -o OUTPUT.bin\n");
     printf("  -p1/-p2 select P12; -p3/-p4/-p5 select P345 automatically.\n");
     printf("  P1/P2 crypt/decrypt requires -h because fw_identifier supplies the key.\n");
+    printf("  Decryption requires a complete 8-byte-aligned ciphertext and writes only the effective P12 stream;\n");
+    printf("  encryption preserves an aligned input and zero-pads only a partial final block.\n");
     printf("\n");
     printf("FlashMe components (select as needed with -x; supply all three with -c):\n");
     printf("  -fh FLASH_HEADER.bin  -fp1 [-comp|-uncomp] FILE  -fp2 [-comp|-uncomp] FILE\n");
     printf("  dsfwtool -fp1 -uncomp INPUT.bin -o OUTPUT.bin\n");
     printf("  dsfwtool -fp1 -comp INPUT.bin -o OUTPUT.bin\n");
     printf("  FlashMe FP1/FP2 are unencrypted P12/LZ77 streams; -encrypt/-decrypt is invalid.\n");
-    printf("  With -c -b, an 0x...FE00 FlashMe dump keeps its truncated physical length;\n");
-    printf("  use -s to write the full logical 256 KiB multiple instead.\n");
+    printf("  Creation writes the complete logical 256 KiB multiple; use -s for a larger capacity.\n");
     printf("\n");
     printf("Header edits for -c (applied before P1/P2 encryption):\n");
     printf("  --identifier ABCD  --console-type VALUE  --timestamp YYMMDDHHMM\n");
@@ -1507,1053 +1297,10 @@ static void print_usage(void)
     printf("  --set-u32 OFFSET VALUE\n");
     printf("  ROM offsets and component CRCs are recalculated, not user-settable.\n");
     printf("  --shift-amounts and --settings-offset are advanced: the former controls\n");
-    printf("  P1/P2 alignment and RAM interpretation; the latter must match user-data\n");
-    printf("  blocks retained in -b or written by a future settings operation.\n");
+    printf("  P1/P2 alignment and RAM interpretation; the latter must match the\n");
+    printf("  user-data area expected by the resulting firmware image.\n");
 }
 
-/* The former directory/manifest command family was superseded by the
-   explicit-file interface below.  It remains excluded while the historical
-   source is retained for reference; no command dispatch can reach it. */
-#if 0
-static int require_option_value(int argc, char **argv, int *index, const char *option, const char **output)
-{
-    if (*index + 1 >= argc) {
-        print_error("%s requires a value", option);
-        return -1;
-    }
-    *output = argv[++*index];
-    return 0;
-}
-
-static int command_info(int argc, char **argv)
-{
-    const char *firmware = NULL;
-    Blob image;
-    FirmwareLayout layout;
-    int i;
-    int result = 1;
-
-    blob_init(&image);
-    for (i = 2; i < argc; i++) {
-        if (strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "--firmware") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &firmware) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--help") == 0) {
-            print_usage();
-            result = 0;
-            goto cleanup;
-        } else {
-            print_error("unknown info option '%s'", argv[i]);
-            goto cleanup;
-        }
-    }
-    if (firmware == NULL) {
-        print_error("info requires -f/--firmware");
-        goto cleanup;
-    }
-    if (read_file(firmware, &image) != 0 || parse_firmware_layout(&image, &layout, 1) != 0) goto cleanup;
-    print_layout(firmware, &image, &layout);
-    result = 0;
-
-cleanup:
-    blob_free(&image);
-    return result;
-}
-
-typedef struct {
-    const char *firmware;
-    const char *directory;
-    const char *selection;
-    const char *header_out;
-    const char *part_out[5];
-    const char *flash_header_out;
-    const char *flash_part_out[2];
-    int no_base;
-} UnpackArguments;
-
-static int output_path_or_default(char *path, size_t path_size, const char *directory,
-                                  const char *override_path, const char *default_name)
-{
-    if (override_path != NULL) {
-        if (snprintf(path, path_size, "%s", override_path) >= (int)path_size) {
-            print_error("output path is too long");
-            return -1;
-        }
-        return 0;
-    }
-    if (directory == NULL) {
-        print_error("no output path was provided for '%s'", default_name);
-        return -1;
-    }
-    return join_path(path, path_size, directory, default_name);
-}
-
-static int command_unpack(int argc, char **argv)
-{
-    UnpackArguments arguments;
-    Blob image;
-    FirmwareLayout layout;
-    unsigned int selection = SELECT_ALL;
-    char path[PATH_BUFFER_SIZE];
-    int i;
-    int result = 1;
-
-    memset(&arguments, 0, sizeof(arguments));
-    blob_init(&image);
-    for (i = 2; i < argc; i++) {
-        if (strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "--firmware") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &arguments.firmware) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--directory") == 0 ||
-                   strcmp(argv[i], "--output-directory") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &arguments.directory) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--only") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &arguments.selection) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--header-out") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &arguments.header_out) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--p1-out") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &arguments.part_out[0]) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--p2-out") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &arguments.part_out[1]) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--p3-out") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &arguments.part_out[2]) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--p4-out") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &arguments.part_out[3]) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--p5-out") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &arguments.part_out[4]) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--flash-header-out") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &arguments.flash_header_out) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--flash-p1-out") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &arguments.flash_part_out[0]) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--flash-p2-out") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &arguments.flash_part_out[1]) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--no-base") == 0) {
-            arguments.no_base = 1;
-        } else if (strcmp(argv[i], "--help") == 0) {
-            print_usage();
-            result = 0;
-            goto cleanup;
-        } else {
-            print_error("unknown unpack option '%s'", argv[i]);
-            goto cleanup;
-        }
-    }
-    if (arguments.firmware == NULL) {
-        print_error("unpack requires -f/--firmware");
-        goto cleanup;
-    }
-    if (arguments.directory == NULL) {
-        selection = 0;
-        arguments.no_base = 1;
-        if (arguments.selection != NULL) {
-            print_error("--only requires -d/--directory; use explicit --*-out paths without a directory");
-            goto cleanup;
-        }
-    } else if (arguments.selection != NULL && parse_component_selection(arguments.selection, &selection) != 0) {
-        goto cleanup;
-    }
-    if (arguments.header_out != NULL) selection |= SELECT_HEADER;
-    for (i = 0; i < 5; i++) if (arguments.part_out[i] != NULL) selection |= (SELECT_P1 << i);
-    if (arguments.flash_header_out != NULL || arguments.flash_part_out[0] != NULL ||
-        arguments.flash_part_out[1] != NULL) selection |= SELECT_FLASHME;
-    if (selection == 0) {
-        print_error("unpack without -d/--directory requires at least one explicit --*-out path");
-        goto cleanup;
-    }
-
-    if (read_file(arguments.firmware, &image) != 0 || parse_firmware_layout(&image, &layout, 1) != 0) goto cleanup;
-    if (arguments.directory != NULL && mkdir_recursive(arguments.directory) != 0) goto cleanup;
-
-    if (selection & SELECT_HEADER) {
-        if (output_path_or_default(path, sizeof(path), arguments.directory, arguments.header_out, "header.bin") != 0 ||
-            write_file(path, image.data, HEADER_BYTES) != 0) goto cleanup;
-        printf("Exported header: %s\n", path);
-    }
-    for (i = 0; i < 5; i++) {
-        unsigned int bit = SELECT_P1 << i;
-        u32 export_size;
-        if ((selection & bit) == 0) continue;
-        export_size = layout.effective_sizes[i];
-        if (i < 2 && round_up_u32(export_size, 8, &export_size) != 0) {
-            print_error("cannot align %s for encryption", primary_part_names[i]);
-            goto cleanup;
-        }
-        if (export_size > layout.spans[i]) {
-            print_error("%s effective size exceeds its allocated span", primary_part_names[i]);
-            goto cleanup;
-        }
-        if (output_path_or_default(path, sizeof(path), arguments.directory, arguments.part_out[i],
-                                   primary_part_names[i]) != 0 ||
-            write_file(path, image.data + layout.offsets[i], export_size) != 0) goto cleanup;
-        printf("Exported %s: %s\n", primary_part_labels[i], path);
-    }
-    if ((selection & SELECT_FLASHME) != 0) {
-        if (!layout.has_flashme) {
-            printf("No FlashMe secondary header was detected; no FlashMe files were exported.\n");
-        } else {
-            if (output_path_or_default(path, sizeof(path), arguments.directory, arguments.flash_header_out,
-                                       "header_flashme.bin") != 0 ||
-                write_file(path, image.data + layout.flashme_header_offset, HEADER_BYTES) != 0) goto cleanup;
-            printf("Exported FlashMe header: %s\n", path);
-            for (i = 0; i < 2; i++) {
-                if (layout.flashme_effective_sizes[i] > layout.flashme_spans[i]) {
-                    print_error("%s effective size exceeds its allocated span", flashme_part_names[i]);
-                    goto cleanup;
-                }
-                if (output_path_or_default(path, sizeof(path), arguments.directory, arguments.flash_part_out[i],
-                                           flashme_part_names[i]) != 0 ||
-                    write_file(path, image.data + layout.flashme_offsets[i],
-                               layout.flashme_effective_sizes[i]) != 0) goto cleanup;
-                printf("Exported FlashMe component: %s\n", path);
-            }
-        }
-    }
-    if (!arguments.no_base) {
-        if (join_path(path, sizeof(path), arguments.directory, "firmware-base.bin") != 0 ||
-            write_file(path, image.data, image.size) != 0) goto cleanup;
-        printf("Preserved base image: %s\n", path);
-    }
-    if (arguments.directory != NULL) {
-        if (write_layout_metadata(arguments.directory, image.size, &layout) != 0) goto cleanup;
-        printf("Unpack complete: %s\n", arguments.directory);
-    } else {
-        printf("Unpack complete.\n");
-    }
-    result = 0;
-
-cleanup:
-    blob_free(&image);
-    return result;
-}
-
-static int command_comp(int argc, char **argv, int forced_mode)
-{
-    const char *type = NULL;
-    const char *input_path = NULL;
-    const char *output_path = NULL;
-    int compress = forced_mode;
-    Blob input;
-    Blob output;
-    int i;
-    int result = 1;
-
-    blob_init(&input);
-    blob_init(&output);
-    for (i = 2; i < argc; i++) {
-        if (strcmp(argv[i], "-p12") == 0) {
-            if (type != NULL && strcmp(type, "12") != 0) {
-                print_error("only one component type may be selected");
-                goto cleanup;
-            }
-            type = "12";
-        } else if (strcmp(argv[i], "-p345") == 0) {
-            if (type != NULL && strcmp(type, "345") != 0) {
-                print_error("only one component type may be selected");
-                goto cleanup;
-            }
-            type = "345";
-        } else if (strcmp(argv[i], "-t") == 0 || strcmp(argv[i], "--type") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &type) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--compress") == 0 || strcmp(argv[i], "-co") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &input_path) != 0) goto cleanup;
-            if (forced_mode == 0) {
-                print_error("uncomp cannot be combined with --compress");
-                goto cleanup;
-            }
-            compress = 1;
-        } else if (strcmp(argv[i], "--decompress") == 0 || strcmp(argv[i], "-de") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &input_path) != 0) goto cleanup;
-            if (forced_mode == 1) {
-                print_error("compress cannot be combined with --decompress");
-                goto cleanup;
-            }
-            compress = 0;
-        } else if (strcmp(argv[i], "-i") == 0 || strcmp(argv[i], "--input") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &input_path) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "--output") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &output_path) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--help") == 0) {
-            print_usage();
-            result = 0;
-            goto cleanup;
-        } else if (argv[i][0] != '-') {
-            if (input_path != NULL) {
-                print_error("input file is already specified");
-                goto cleanup;
-            }
-            input_path = argv[i];
-        } else {
-            print_error("unknown comp option '%s'", argv[i]);
-            goto cleanup;
-        }
-    }
-    if (type == NULL || input_path == NULL || output_path == NULL || compress < 0 ||
-        (strcmp(type, "12") != 0 && strcmp(type, "345") != 0)) {
-        print_error("comp requires -p12 or -p345, one operation, and -o/--output");
-        goto cleanup;
-    }
-    if (read_file(input_path, &input) != 0) goto cleanup;
-    if (strcmp(type, "12") == 0) {
-        if (compress ? compress_p12(&input, &output) : decode_p12(input.data, input.size, &output)) goto cleanup;
-    } else {
-        if (compress ? compress_p345(&input, &output) : decode_p345(input.data, input.size, &output)) goto cleanup;
-    }
-    if (write_file(output_path, output.data, output.size) != 0) goto cleanup;
-    printf("%s P%s: %s -> %s (0x%lX bytes)\n",
-           compress ? "Compressed" : "Decompressed", type, input_path, output_path,
-           (unsigned long)output.size);
-    result = 0;
-
-cleanup:
-    blob_free(&input);
-    blob_free(&output);
-    return result;
-}
-
-static int command_crypt(int argc, char **argv, int forced_mode)
-{
-    const char *header_path = NULL;
-    const char *input_path = NULL;
-    const char *output_path = NULL;
-    int encrypt = forced_mode;
-    Blob header;
-    Blob input;
-    Blob output;
-    int i;
-    int result = 1;
-
-    blob_init(&header);
-    blob_init(&input);
-    blob_init(&output);
-    for (i = 2; i < argc; i++) {
-        if (strcmp(argv[i], "-p12") == 0) {
-            /* Encryption is defined only for the P1/P2 format. */
-        } else if (strcmp(argv[i], "-p345") == 0) {
-            print_error("P3/P4/P5 components do not use the P1/P2 encryption layer");
-            goto cleanup;
-        } else if (strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "-h") == 0 ||
-                   strcmp(argv[i], "--header") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &header_path) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--encrypt") == 0 || strcmp(argv[i], "-en") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &input_path) != 0) goto cleanup;
-            if (forced_mode == 0) {
-                print_error("decrypt cannot be combined with --encrypt");
-                goto cleanup;
-            }
-            encrypt = 1;
-        } else if (strcmp(argv[i], "--decrypt") == 0 || strcmp(argv[i], "-de") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &input_path) != 0) goto cleanup;
-            if (forced_mode == 1) {
-                print_error("encrypt cannot be combined with --decrypt");
-                goto cleanup;
-            }
-            encrypt = 0;
-        } else if (strcmp(argv[i], "-i") == 0 || strcmp(argv[i], "--input") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &input_path) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "--output") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &output_path) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--help") == 0) {
-            print_usage();
-            result = 0;
-            goto cleanup;
-        } else if (argv[i][0] != '-') {
-            if (input_path != NULL) {
-                print_error("input file is already specified");
-                goto cleanup;
-            }
-            input_path = argv[i];
-        } else {
-            print_error("unknown crypt option '%s'", argv[i]);
-            goto cleanup;
-        }
-    }
-    if (header_path == NULL || input_path == NULL || output_path == NULL || encrypt < 0) {
-        print_error("crypt requires -h/--header, one operation, and -o/--output");
-        goto cleanup;
-    }
-    if (read_header_file(header_path, &header) != 0 || read_file(input_path, &input) != 0) goto cleanup;
-    if (encrypt ? encrypt_p12((const FW_HEADER *)header.data, &input, &output)
-                : decrypt_p12((const FW_HEADER *)header.data, &input, &output)) goto cleanup;
-    if (write_file(output_path, output.data, output.size) != 0) goto cleanup;
-    printf("%s P1/P2 stream: %s -> %s (0x%lX bytes)\n",
-           encrypt ? "Encrypted" : "Decrypted", input_path, output_path, (unsigned long)output.size);
-    result = 0;
-
-cleanup:
-    blob_free(&header);
-    blob_free(&input);
-    blob_free(&output);
-    return result;
-}
-
-static int command_p12(int argc, char **argv, int forced_mode)
-{
-    const char *header_path = NULL;
-    const char *input_path = NULL;
-    const char *output_path = NULL;
-    int encode = forced_mode;
-    Blob header;
-    Blob input;
-    Blob middle;
-    Blob output;
-    int i;
-    int result = 1;
-
-    blob_init(&header);
-    blob_init(&input);
-    blob_init(&middle);
-    blob_init(&output);
-    for (i = 2; i < argc; i++) {
-        if (strcmp(argv[i], "-p12") == 0) {
-            /* The command itself is already P1/P2-specific. */
-        } else if (strcmp(argv[i], "-p345") == 0) {
-            print_error("p12 chain operations cannot be used with -p345");
-            goto cleanup;
-        } else if (strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "-h") == 0 ||
-                   strcmp(argv[i], "--header") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &header_path) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--encode") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &input_path) != 0) goto cleanup;
-            if (forced_mode == 0) {
-                print_error("decode cannot be combined with --encode");
-                goto cleanup;
-            }
-            encode = 1;
-        } else if (strcmp(argv[i], "--decode") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &input_path) != 0) goto cleanup;
-            if (forced_mode == 1) {
-                print_error("encode cannot be combined with --decode");
-                goto cleanup;
-            }
-            encode = 0;
-        } else if (strcmp(argv[i], "-i") == 0 || strcmp(argv[i], "--input") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &input_path) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "--output") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &output_path) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--help") == 0) {
-            print_usage();
-            result = 0;
-            goto cleanup;
-        } else if (argv[i][0] != '-') {
-            if (input_path != NULL) {
-                print_error("input file is already specified");
-                goto cleanup;
-            }
-            input_path = argv[i];
-        } else {
-            print_error("unknown p12 option '%s'", argv[i]);
-            goto cleanup;
-        }
-    }
-    if (header_path == NULL || input_path == NULL || output_path == NULL || encode < 0) {
-        print_error("p12 requires -h/--header, --encode/--decode, and -o/--output");
-        goto cleanup;
-    }
-    if (read_header_file(header_path, &header) != 0 || read_file(input_path, &input) != 0) goto cleanup;
-    if (encode) {
-        if (compress_p12(&input, &middle) != 0 ||
-            encrypt_p12((const FW_HEADER *)header.data, &middle, &output) != 0) goto cleanup;
-    } else {
-        if (decrypt_p12((const FW_HEADER *)header.data, &input, &middle) != 0 ||
-            decode_p12(middle.data, middle.size, &output) != 0) goto cleanup;
-    }
-    if (write_file(output_path, output.data, output.size) != 0) goto cleanup;
-    printf("P1/P2 %s complete: %s -> %s (0x%lX bytes)\n",
-           encode ? "compress+encrypt" : "decrypt+decompress",
-           input_path, output_path, (unsigned long)output.size);
-    result = 0;
-
-cleanup:
-    blob_free(&header);
-    blob_free(&input);
-    blob_free(&middle);
-    blob_free(&output);
-    return result;
-}
-
-static int command_header(int argc, char **argv)
-{
-    const char *input_path = NULL;
-    const char *output_path = NULL;
-    HeaderEdits edits;
-    Blob header;
-    int has_edits = 0;
-    int i;
-    int result = 1;
-
-    memset(&edits, 0, sizeof(edits));
-    blob_init(&header);
-    for (i = 2; i < argc; i++) {
-        int parsed_edit;
-        if (strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "--input") == 0 ||
-            strcmp(argv[i], "--header") == 0 || strcmp(argv[i], "--firmware") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &input_path) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "--output") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &output_path) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--show") == 0) {
-            /* Showing is the default behaviour. */
-        } else if (strcmp(argv[i], "--help") == 0) {
-            print_usage();
-            result = 0;
-            goto cleanup;
-        } else {
-            parsed_edit = parse_header_edit_option(argc, argv, &i, &edits);
-            if (parsed_edit < 0) goto cleanup;
-            if (parsed_edit == 0) {
-                print_error("unknown header option '%s'", argv[i]);
-                goto cleanup;
-            }
-            has_edits = 1;
-        }
-    }
-    if (input_path == NULL) {
-        print_error("header requires -f/--input");
-        goto cleanup;
-    }
-    if (has_edits && output_path == NULL) {
-        print_error("header edits require -o/--output; the input is never overwritten implicitly");
-        goto cleanup;
-    }
-    if (read_header_file(input_path, &header) != 0 || apply_header_edits(&header, &edits) != 0) goto cleanup;
-    print_header_fields((const FW_HEADER *)header.data, "Header:");
-    if (output_path != NULL) {
-        if (write_file(output_path, header.data, HEADER_BYTES) != 0) goto cleanup;
-        printf("Header written: %s\n", output_path);
-    }
-    result = 0;
-
-cleanup:
-    blob_free(&header);
-    return result;
-}
-
-typedef struct {
-    const char *directory;
-    const char *output;
-    const char *header;
-    const char *parts[5];
-    const char *flash_header;
-    const char *flash_parts[2];
-    const char *base;
-    const char *size;
-    const char *flashme_offset;
-    int no_base;
-    HeaderEdits edits;
-} PackArguments;
-
-static int resolve_input_path(char *path, size_t path_size, const char *directory,
-                              const char *override_path, const char *default_name,
-                              const char **result)
-{
-    if (override_path != NULL) {
-        *result = override_path;
-        return 0;
-    }
-    if (directory == NULL) {
-        print_error("no input path was provided for '%s'", default_name);
-        return -1;
-    }
-    if (join_path(path, path_size, directory, default_name) != 0) return -1;
-    *result = path;
-    return 0;
-}
-
-static int command_pack(int argc, char **argv)
-{
-    PackArguments arguments;
-    Blob header;
-    Blob parts[5];
-    Blob base;
-    Blob flash_header;
-    Blob flash_parts[2];
-    Blob output;
-    LayoutMetadata metadata;
-    const char *header_path;
-    const char *part_paths[5];
-    const char *flash_header_path;
-    const char *flash_part_paths[2];
-    const char *base_path = NULL;
-    char header_path_buffer[PATH_BUFFER_SIZE];
-    char part_path_buffers[5][PATH_BUFFER_SIZE];
-    char flash_header_path_buffer[PATH_BUFFER_SIZE];
-    char flash_part_path_buffers[2][PATH_BUFFER_SIZE];
-    char base_path_buffer[PATH_BUFFER_SIZE];
-    char metadata_path[PATH_BUFFER_SIZE];
-    FW_HEADER *primary_header;
-    FW_HEADER *secondary_header = NULL;
-    u32 original_offsets[5];
-    u32 new_offsets[5];
-    u32 flash_original_offsets[2];
-    u32 flash_new_offsets[2];
-    u32 primary_end;
-    u32 flash_end = HEADER_BYTES;
-    u32 required_end;
-    u32 capacity = 0;
-    u32 requested_size = 0;
-    u32 flashme_header_offset = 0;
-    u32 parsed_flashme_offset = 0;
-    u16 part12_crc;
-    u16 part34_crc;
-    u16 part5_crc;
-    u16 flash_part12_crc;
-    int has_flashme = 0;
-    int has_explicit_flashme_offset = 0;
-    int has_explicit_size = 0;
-    int force_auto_size = 0;
-    int i;
-    int result = 1;
-
-    memset(&arguments, 0, sizeof(arguments));
-    memset(&metadata, 0, sizeof(metadata));
-    blob_init(&header);
-    blob_init(&base);
-    blob_init(&flash_header);
-    blob_init(&output);
-    for (i = 0; i < 5; i++) blob_init(&parts[i]);
-    for (i = 0; i < 2; i++) blob_init(&flash_parts[i]);
-
-    for (i = 2; i < argc; i++) {
-        int parsed_edit;
-        if (strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--directory") == 0 ||
-            strcmp(argv[i], "--input-directory") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &arguments.directory) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "--output") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &arguments.output) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--header") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &arguments.header) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--p1") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &arguments.parts[0]) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--p2") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &arguments.parts[1]) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--p3") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &arguments.parts[2]) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--p4") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &arguments.parts[3]) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--p5") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &arguments.parts[4]) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--flash-header") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &arguments.flash_header) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--flash-p1") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &arguments.flash_parts[0]) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--flash-p2") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &arguments.flash_parts[1]) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--base") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &arguments.base) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--no-base") == 0) {
-            arguments.no_base = 1;
-        } else if (strcmp(argv[i], "--size") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &arguments.size) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--flashme-offset") == 0) {
-            if (require_option_value(argc, argv, &i, argv[i], &arguments.flashme_offset) != 0) goto cleanup;
-        } else if (strcmp(argv[i], "--help") == 0) {
-            print_usage();
-            result = 0;
-            goto cleanup;
-        } else {
-            parsed_edit = parse_header_edit_option(argc, argv, &i, &arguments.edits);
-            if (parsed_edit < 0) goto cleanup;
-            if (parsed_edit == 0) {
-                print_error("unknown pack option '%s'", argv[i]);
-                goto cleanup;
-            }
-        }
-    }
-    if (arguments.output == NULL) {
-        print_error("pack requires -o/--output");
-        goto cleanup;
-    }
-    if (arguments.directory == NULL &&
-        (arguments.header == NULL || arguments.parts[0] == NULL || arguments.parts[1] == NULL ||
-         arguments.parts[2] == NULL || arguments.parts[3] == NULL || arguments.parts[4] == NULL)) {
-        print_error("pack without -d/--directory requires --header and --p1 through --p5");
-        goto cleanup;
-    }
-    if (arguments.size != NULL) {
-        if (parse_size(arguments.size, &requested_size, &force_auto_size) != 0) goto cleanup;
-        has_explicit_size = !force_auto_size;
-    }
-    if (arguments.flashme_offset != NULL) {
-        if (parse_u32(arguments.flashme_offset, &parsed_flashme_offset) != 0) goto cleanup;
-        has_explicit_flashme_offset = 1;
-    }
-    if (has_explicit_size && (requested_size % CAPACITY_UNIT) != 0) {
-        print_error("--size must be a multiple of 256 KiB (0x%X bytes)", CAPACITY_UNIT);
-        goto cleanup;
-    }
-
-    if (resolve_input_path(header_path_buffer, sizeof(header_path_buffer), arguments.directory,
-                           arguments.header, "header.bin", &header_path) != 0 ||
-        read_header_file(header_path, &header) != 0 ||
-        apply_header_edits(&header, &arguments.edits) != 0) goto cleanup;
-    primary_header = (FW_HEADER *)header.data;
-
-    for (i = 0; i < 5; i++) {
-        if (resolve_input_path(part_path_buffers[i], sizeof(part_path_buffers[i]), arguments.directory,
-                               arguments.parts[i], primary_part_names[i], &part_paths[i]) != 0 ||
-            read_aligned_component(part_paths[i], primary_part_alignment(primary_header, i), i < 2,
-                                   &parts[i]) != 0) goto cleanup;
-        original_offsets[i] = primary_part_offset(primary_header, i);
-    }
-    if (build_relocated_positions(original_offsets, parts, 5, new_offsets) != 0 ||
-        calculate_primary_crcs(primary_header, parts, &part12_crc, &part34_crc, &part5_crc) != 0 ||
-        set_primary_component_offsets(primary_header, new_offsets) != 0) goto cleanup;
-    primary_header->part12_crc16 = part12_crc;
-    primary_header->part34_crc16 = part34_crc;
-    primary_header->part5_crc16 = part5_crc;
-    if (max_component_end(new_offsets, parts, 5, &primary_end) != 0) goto cleanup;
-
-    if (arguments.flash_header != NULL) {
-        flash_header_path = arguments.flash_header;
-        has_flashme = 1;
-    } else if (arguments.directory != NULL) {
-        if (join_path(flash_header_path_buffer, sizeof(flash_header_path_buffer),
-                      arguments.directory, "header_flashme.bin") != 0) goto cleanup;
-        flash_header_path = flash_header_path_buffer;
-        has_flashme = file_exists(flash_header_path);
-    } else {
-        flash_header_path = NULL;
-        has_flashme = 0;
-    }
-    if (!has_flashme && (arguments.flash_parts[0] != NULL || arguments.flash_parts[1] != NULL)) {
-        print_error("--flash-p1/--flash-p2 require a FlashMe header");
-        goto cleanup;
-    }
-    if (has_flashme) {
-        if (read_header_file(flash_header_path, &flash_header) != 0) goto cleanup;
-        secondary_header = (FW_HEADER *)flash_header.data;
-        for (i = 0; i < 2; i++) {
-            if (resolve_input_path(flash_part_path_buffers[i], sizeof(flash_part_path_buffers[i]),
-                                   arguments.directory, arguments.flash_parts[i],
-                                   flashme_part_names[i], &flash_part_paths[i]) != 0 ||
-                read_aligned_component(flash_part_paths[i], flashme_part_alignment(secondary_header, i),
-                                       0, &flash_parts[i]) != 0) goto cleanup;
-            flash_original_offsets[i] = flashme_part_offset(secondary_header, i);
-        }
-        if (build_relocated_positions(flash_original_offsets, flash_parts, 2, flash_new_offsets) != 0 ||
-            calculate_flashme_crc(flash_parts, &flash_part12_crc) != 0 ||
-            set_flashme_component_offsets(secondary_header, flash_new_offsets) != 0) goto cleanup;
-        secondary_header->part12_crc16 = flash_part12_crc;
-        if (max_component_end(flash_new_offsets, flash_parts, 2, &flash_end) != 0) goto cleanup;
-    }
-
-    if (arguments.directory != NULL) {
-        if (join_path(metadata_path, sizeof(metadata_path), arguments.directory, "fwtool.meta") != 0) goto cleanup;
-        read_layout_metadata(metadata_path, &metadata);
-    }
-
-    if (!arguments.no_base) {
-        if (arguments.base != NULL) {
-            base_path = arguments.base;
-            if (!file_exists(base_path)) {
-                print_error("specified base image '%s' does not exist", base_path);
-                goto cleanup;
-            }
-        } else if (arguments.directory != NULL) {
-            if (join_path(base_path_buffer, sizeof(base_path_buffer), arguments.directory,
-                          "firmware-base.bin") != 0) goto cleanup;
-            if (file_exists(base_path_buffer)) base_path = base_path_buffer;
-        }
-        if (base_path != NULL && read_file(base_path, &base) != 0) goto cleanup;
-    }
-
-    required_end = primary_end > flash_end ? primary_end : flash_end;
-    if (has_flashme && has_explicit_flashme_offset) {
-        if (parsed_flashme_offset > UINT_MAX - HEADER_BYTES) {
-            print_error("--flashme-offset is out of range");
-            goto cleanup;
-        }
-        if (parsed_flashme_offset + HEADER_BYTES > required_end) {
-            required_end = parsed_flashme_offset + HEADER_BYTES;
-        }
-    } else if (has_flashme && !has_explicit_size && !force_auto_size &&
-               metadata.has_flashme_header_offset) {
-        flashme_header_offset = metadata.flashme_header_offset;
-        if (flashme_header_offset > UINT_MAX - HEADER_BYTES) {
-            print_error("fwtool.meta contains an invalid FlashMe header offset");
-            goto cleanup;
-        }
-        if (flashme_header_offset + HEADER_BYTES > required_end) {
-            required_end = flashme_header_offset + HEADER_BYTES;
-        }
-    }
-
-    if (has_explicit_size) {
-        capacity = requested_size;
-    } else if (!force_auto_size && metadata.has_image_size) {
-        capacity = metadata.image_size;
-    } else {
-        u32 minimum = required_end;
-        if (has_flashme && flashme_header_offset == 0 && !has_explicit_flashme_offset) {
-            if (minimum > UINT_MAX - FLASHME_TRAILER) {
-                print_error("FlashMe layout exceeds the firmware address space");
-                goto cleanup;
-            }
-            minimum += FLASHME_TRAILER;
-        }
-        if (round_up_u32(minimum, CAPACITY_UNIT, &capacity) != 0) {
-            print_error("cannot choose an automatic firmware capacity");
-            goto cleanup;
-        }
-    }
-    if (capacity == 0 || (capacity % CAPACITY_UNIT) != 0) {
-        print_error("firmware capacity must be a non-zero multiple of 256 KiB");
-        goto cleanup;
-    }
-    if (has_flashme) {
-        if (has_explicit_flashme_offset) flashme_header_offset = parsed_flashme_offset;
-        else if (flashme_header_offset == 0) {
-            if (capacity < FLASHME_TRAILER) {
-                print_error("firmware capacity is too small for a FlashMe header");
-                goto cleanup;
-            }
-            flashme_header_offset = capacity - FLASHME_TRAILER;
-        }
-        if (flashme_header_offset > capacity || HEADER_BYTES > capacity - flashme_header_offset) {
-            print_error("FlashMe header does not fit in the requested firmware capacity");
-            goto cleanup;
-        }
-        if (flashme_header_offset < primary_end || flashme_header_offset < flash_end) {
-            print_error("components overlap the FlashMe header; increase --size or choose --flashme-offset");
-            goto cleanup;
-        }
-    }
-    if (required_end > capacity || primary_end > capacity || flash_end > capacity) {
-        print_error("components do not fit in the requested firmware capacity");
-        goto cleanup;
-    }
-
-    {
-        FirmwareRange ranges[MAX_RANGES];
-        int range_count = 0;
-        if (add_firmware_range(ranges, &range_count, 0, HEADER_BYTES, capacity, "primary header") != 0) goto cleanup;
-        for (i = 0; i < 5; i++) {
-            if (add_firmware_range(ranges, &range_count, new_offsets[i], (u32)parts[i].size,
-                                   capacity, primary_part_names[i]) != 0) goto cleanup;
-        }
-        if (has_flashme) {
-            if (add_firmware_range(ranges, &range_count, flashme_header_offset, HEADER_BYTES,
-                                   capacity, "FlashMe header") != 0) goto cleanup;
-            for (i = 0; i < 2; i++) {
-                if (add_firmware_range(ranges, &range_count, flash_new_offsets[i],
-                                       (u32)flash_parts[i].size, capacity,
-                                       flashme_part_names[i]) != 0) goto cleanup;
-            }
-        }
-    }
-
-    if (blob_alloc(&output, capacity) != 0) goto cleanup;
-    memset(output.data, 0, output.size);
-    if (base.data != NULL) {
-        size_t copy_size = base.size < output.size ? base.size : output.size;
-        memcpy(output.data, base.data, copy_size);
-        if (has_flashme && metadata.has_flashme_header_offset &&
-            metadata.flashme_header_offset != flashme_header_offset &&
-            metadata.flashme_header_offset < output.size &&
-            HEADER_BYTES <= output.size - metadata.flashme_header_offset) {
-            memset(output.data + metadata.flashme_header_offset, 0, HEADER_BYTES);
-        }
-    }
-    memcpy(output.data, header.data, HEADER_BYTES);
-    for (i = 0; i < 5; i++) {
-        memcpy(output.data + new_offsets[i], parts[i].data, parts[i].size);
-    }
-    if (has_flashme) {
-        memcpy(output.data + flashme_header_offset, flash_header.data, HEADER_BYTES);
-        for (i = 0; i < 2; i++) {
-            memcpy(output.data + flash_new_offsets[i], flash_parts[i].data, flash_parts[i].size);
-        }
-    }
-    if (write_file(arguments.output, output.data, output.size) != 0) goto cleanup;
-    printf("Packed firmware: %s\n", arguments.output);
-    printf("Capacity: 0x%08X (%u KiB)%s\n", capacity, capacity / 1024,
-           base.data != NULL ? ", preserved base image used" : "");
-    if (has_flashme) printf("FlashMe secondary header: 0x%06X\n", flashme_header_offset);
-    result = 0;
-
-cleanup:
-    blob_free(&header);
-    blob_free(&base);
-    blob_free(&flash_header);
-    blob_free(&output);
-    for (i = 0; i < 5; i++) blob_free(&parts[i]);
-    for (i = 0; i < 2; i++) blob_free(&flash_parts[i]);
-    return result;
-}
-
-static int append_action_argument(const char **arguments, int *count, int capacity, const char *value)
-{
-    if (*count >= capacity) {
-        print_error("too many command-line arguments");
-        return -1;
-    }
-    arguments[(*count)++] = value;
-    return 0;
-}
-
-static int append_action_option_with_value(const char **arguments, int *count, int capacity,
-                                           const char *option, int argc, char **argv, int *index)
-{
-    if (*index + 1 >= argc) {
-        print_error("%s requires a value", argv[*index]);
-        return -1;
-    }
-    if (append_action_argument(arguments, count, capacity, option) != 0 ||
-        append_action_argument(arguments, count, capacity, argv[++*index]) != 0) return -1;
-    return 0;
-}
-
-static int command_ndstool_style(int argc, char **argv)
-{
-    enum { ACTION_INFO, ACTION_UNPACK, ACTION_PACK } action;
-    const char *converted[128];
-    char *mutable_arguments[128];
-    const char *firmware = NULL;
-    int count = 0;
-    int i;
-    int mutable_count;
-
-    if (strcmp(argv[1], "-i") == 0) action = ACTION_INFO;
-    else if (strcmp(argv[1], "-x") == 0) action = ACTION_UNPACK;
-    else action = ACTION_PACK;
-
-    for (i = 2; i < argc; i++) {
-        const char *option = argv[i];
-        const char *mapped = NULL;
-        if (option[0] != '-') {
-            if (firmware != NULL) {
-                print_error("firmware filename is already specified");
-                return 1;
-            }
-            firmware = option;
-            continue;
-        }
-        if (strcmp(option, "-?") == 0 || strcmp(option, "--help") == 0) {
-            print_usage();
-            return 0;
-        }
-        if (strcmp(option, "-d") == 0) {
-            if (action == ACTION_INFO) {
-                print_error("-d is not valid with -i");
-                return 1;
-            }
-            if (append_action_option_with_value(converted, &count, 128, "-d", argc, argv, &i) != 0) return 1;
-            continue;
-        }
-        if (strcmp(option, "-h") == 0) mapped = action == ACTION_UNPACK ? "--header-out" : "--header";
-        else if (strcmp(option, "-9") == 0) mapped = action == ACTION_UNPACK ? "--p1-out" : "--p1";
-        else if (strcmp(option, "-7") == 0) mapped = action == ACTION_UNPACK ? "--p2-out" : "--p2";
-        else if (strcmp(option, "-p3") == 0) mapped = action == ACTION_UNPACK ? "--p3-out" : "--p3";
-        else if (strcmp(option, "-p4") == 0) mapped = action == ACTION_UNPACK ? "--p4-out" : "--p4";
-        else if (strcmp(option, "-p5") == 0) mapped = action == ACTION_UNPACK ? "--p5-out" : "--p5";
-        else if (strcmp(option, "-fh") == 0) mapped = action == ACTION_UNPACK ? "--flash-header-out" : "--flash-header";
-        else if (strcmp(option, "-f9") == 0) mapped = action == ACTION_UNPACK ? "--flash-p1-out" : "--flash-p1";
-        else if (strcmp(option, "-f7") == 0) mapped = action == ACTION_UNPACK ? "--flash-p2-out" : "--flash-p2";
-
-        if (mapped != NULL) {
-            if (action == ACTION_INFO) {
-                print_error("%s is not valid with -i", option);
-                return 1;
-            }
-            if (append_action_option_with_value(converted, &count, 128, mapped, argc, argv, &i) != 0) return 1;
-            continue;
-        }
-        if (strcmp(option, "-s") == 0) {
-            if (action != ACTION_PACK) {
-                print_error("-s is only valid with -c");
-                return 1;
-            }
-            if (append_action_option_with_value(converted, &count, 128, "--size", argc, argv, &i) != 0) return 1;
-            continue;
-        }
-        if (strcmp(option, "-b") == 0) {
-            if (action != ACTION_PACK) {
-                print_error("-b is only valid with -c");
-                return 1;
-            }
-            if (append_action_option_with_value(converted, &count, 128, "--base", argc, argv, &i) != 0) return 1;
-            continue;
-        }
-        if (strcmp(option, "--no-base") == 0) {
-            if (action == ACTION_INFO) {
-                print_error("--no-base is not valid with -i");
-                return 1;
-            }
-            if (append_action_argument(converted, &count, 128, option) != 0) return 1;
-            continue;
-        }
-        if (strcmp(option, "--only") == 0) {
-            if (action != ACTION_UNPACK) {
-                print_error("--only is only valid with -x");
-                return 1;
-            }
-            if (append_action_option_with_value(converted, &count, 128, option, argc, argv, &i) != 0) return 1;
-            continue;
-        }
-        if (strcmp(option, "--flashme-offset") == 0 || strcmp(option, "--size") == 0 ||
-            strcmp(option, "--base") == 0) {
-            if (action != ACTION_PACK) {
-                print_error("%s is only valid with -c", option);
-                return 1;
-            }
-            if (append_action_option_with_value(converted, &count, 128, option, argc, argv, &i) != 0) return 1;
-            continue;
-        }
-        if (strcmp(option, "--identifier") == 0 || strcmp(option, "--timestamp") == 0 ||
-            strcmp(option, "--console-type") == 0 || strcmp(option, "--shift-amounts") == 0 ||
-            strcmp(option, "--part1-romaddr") == 0 || strcmp(option, "--part1-ramaddr") == 0 ||
-            strcmp(option, "--part2-romaddr") == 0 || strcmp(option, "--part2-ramaddr") == 0 ||
-            strcmp(option, "--part3-romaddr") == 0 || strcmp(option, "--part4-romaddr") == 0 ||
-            strcmp(option, "--part5-romaddr") == 0 || strcmp(option, "--settings-offset") == 0) {
-            if (action != ACTION_PACK) {
-                print_error("%s is only valid with -c", option);
-                return 1;
-            }
-            if (append_action_option_with_value(converted, &count, 128, option, argc, argv, &i) != 0) return 1;
-            continue;
-        }
-        if (strcmp(option, "--set-u8") == 0 || strcmp(option, "--set-u16") == 0 ||
-            strcmp(option, "--set-u32") == 0) {
-            if (action != ACTION_PACK || i + 2 >= argc) {
-                print_error("%s is only valid with -c and requires OFFSET VALUE", option);
-                return 1;
-            }
-            if (append_action_argument(converted, &count, 128, option) != 0 ||
-                append_action_argument(converted, &count, 128, argv[++i]) != 0 ||
-                append_action_argument(converted, &count, 128, argv[++i]) != 0) return 1;
-            continue;
-        }
-        print_error("unknown ndstool-style option '%s'", option);
-        return 1;
-    }
-
-    if (firmware == NULL) {
-        print_error("%s requires a firmware filename", argv[1]);
-        return 1;
-    }
-    {
-        const char *command = action == ACTION_INFO ? "info" :
-                              (action == ACTION_UNPACK ? "unpack" : "pack");
-        int final_count = 0;
-        mutable_arguments[final_count++] = argv[0];
-        mutable_arguments[final_count++] = (char *)command;
-        if (action == ACTION_INFO || action == ACTION_UNPACK) {
-            mutable_arguments[final_count++] = (char *)"-f";
-            mutable_arguments[final_count++] = (char *)firmware;
-        } else {
-            mutable_arguments[final_count++] = (char *)"-o";
-            mutable_arguments[final_count++] = (char *)firmware;
-        }
-        for (i = 0; i < count; i++) mutable_arguments[final_count++] = (char *)converted[i];
-        mutable_count = final_count;
-    }
-    if (action == ACTION_INFO) return command_info(mutable_count, mutable_arguments);
-    if (action == ACTION_UNPACK) return command_unpack(mutable_count, mutable_arguments);
-    return command_pack(mutable_count, mutable_arguments);
-}
-
-#endif
-
-/* The public dsfwtool interface deliberately has no working-directory mode.
-   Every artifact is named on the command line, in the same spirit as
-   ndstool. */
 enum {
     FWCOMP_HEADER = 0,
     FWCOMP_P1,
@@ -2577,7 +1324,6 @@ typedef struct {
 
 typedef struct {
     ExplicitComponent components[FWCOMP_COUNT];
-    const char *base_path;
     const char *size_text;
     u8 fill_byte;
     HeaderEdits edits;
@@ -2755,10 +1501,6 @@ static int parse_explicit_firmware_request(int argc, char **argv, int first_opti
             if (take_option_value(argc, argv, &i, argv[i], &request->size_text) != 0) return -1;
             continue;
         }
-        if (create && (strcmp(argv[i], "-b") == 0 || strcmp(argv[i], "--base") == 0)) {
-            if (take_option_value(argc, argv, &i, argv[i], &request->base_path) != 0) return -1;
-            continue;
-        }
         if (create && strcmp(argv[i], "--fill") == 0) {
             const char *value;
             if (take_option_value(argc, argv, &i, "--fill", &value) != 0 ||
@@ -2864,6 +1606,59 @@ static int max_reserved_end(const u32 *offsets, const u32 *reserved_sizes, int c
     return 0;
 }
 
+/* P3/P4/P5 store their effective bitstream size, not their trailing address
+   alignment bytes.  Keep those bytes out of exported component files, then
+   synthesize zeroes through the next 8-byte boundary while assembling the
+   image.  The boundary must never overwrite a following component or the
+   FlashMe trailer header.  P1/P2 are different: their encryption layer owns
+   the corresponding 8-byte padding. */
+static int write_p345_alignment_padding(Blob *output, const u32 primary_offsets[5],
+                                        const Blob primary_parts[5],
+                                        const u32 flash_offsets[2], int has_flashme,
+                                        u32 flash_header_offset)
+{
+    int i;
+
+    for (i = 2; i < 5; i++) {
+        u32 end;
+        u32 padded_end;
+        u32 next_start = UINT_MAX;
+        int j;
+
+        if (primary_parts[i].size > UINT_MAX - primary_offsets[i]) {
+            print_error("P%d alignment padding exceeds the firmware address space", i + 1);
+            return -1;
+        }
+        end = primary_offsets[i] + (u32)primary_parts[i].size;
+        if (round_up_u32(end, 8, &padded_end) != 0) {
+            print_error("P%d alignment padding cannot be calculated", i + 1);
+            return -1;
+        }
+        for (j = 0; j < 5; j++) {
+            if (j != i && primary_offsets[j] > end && primary_offsets[j] < next_start) {
+                next_start = primary_offsets[j];
+            }
+        }
+        if (has_flashme) {
+            for (j = 0; j < 2; j++) {
+                if (flash_offsets[j] > end && flash_offsets[j] < next_start) {
+                    next_start = flash_offsets[j];
+                }
+            }
+            if (flash_header_offset > end && flash_header_offset < next_start) {
+                next_start = flash_header_offset;
+            }
+        }
+        if (next_start != UINT_MAX && padded_end > next_start) padded_end = next_start;
+        if (padded_end > output->size) {
+            print_error("P%d alignment padding does not fit in the output image", i + 1);
+            return -1;
+        }
+        if (padded_end > end) memset(output->data + end, 0, padded_end - end);
+    }
+    return 0;
+}
+
 static int extract_primary_p12_component(const Blob *image, const FirmwareLayout *layout,
                                          int index, const ExplicitComponent *request)
 {
@@ -2877,9 +1672,12 @@ static int extract_primary_p12_component(const Blob *image, const FirmwareLayout
     blob_init(&encrypted);
     blob_init(&decrypted);
     blob_init(&plain);
-    if (round_up_u32(layout->effective_sizes[index], 8, &raw_size) != 0 ||
-        raw_size > layout->spans[index]) {
-        print_error("cannot determine the encrypted size of %s", primary_part_names[index]);
+    /* The stored component occupies its full range up to the next component.
+       Decrypt that complete original ciphertext range first; decrypt_p12()
+       determines and trims the logical stream only afterwards. */
+    raw_size = layout->spans[index];
+    if (raw_size == 0) {
+        print_error("cannot determine the encrypted range of %s", primary_part_names[index]);
         goto cleanup;
     }
     if (!request->decrypt) {
@@ -3087,7 +1885,6 @@ static int command_explicit_create(int argc, char **argv)
     Blob flash_header;
     Blob primary_parts[5];
     Blob flash_parts[2];
-    Blob base;
     Blob output;
     FW_HEADER *primary_header;
     FW_HEADER *secondary_header;
@@ -3116,7 +1913,6 @@ static int command_explicit_create(int argc, char **argv)
 
     blob_init(&header);
     blob_init(&flash_header);
-    blob_init(&base);
     blob_init(&output);
     for (i = 0; i < 5; i++) blob_init(&primary_parts[i]);
     for (i = 0; i < 2; i++) blob_init(&flash_parts[i]);
@@ -3166,60 +1962,31 @@ static int command_explicit_create(int argc, char **argv)
         (has_flashme && max_reserved_end(flash_new_offsets, flash_reserved_sizes, 2,
                                           &flash_end) != 0)) goto cleanup;
 
-    if (request.base_path != NULL) {
-        if (read_file(request.base_path, &base) != 0 || base.size == 0 || base.size > UINT_MAX) goto cleanup;
-    }
     if (request.size_text != NULL) {
         if (parse_size(request.size_text, &requested_size, &automatic_size) != 0) goto cleanup;
     }
     minimum_size = primary_end > flash_end ? primary_end : flash_end;
     if (automatic_size) {
-        if (base.data != NULL) {
-            if (has_flashme) {
-                /* Some FlashMe dumps omit the final 0x200-byte settings
-                   sector.  Their physical file is 0x...FE00, while the
-                   secondary header still belongs at the end of the logical
-                   0x...0000 flash capacity.  Preserve that physical length
-                   for an automatic base-image repack. */
-                if (round_up_u32((u32)base.size, CAPACITY_UNIT, &logical_capacity) != 0) {
-                    print_error("automatic FlashMe capacity is out of range");
-                    goto cleanup;
-                }
-                output_size = (u32)base.size;
-            } else {
-                logical_capacity = (u32)base.size;
-                output_size = logical_capacity;
-            }
-        } else {
-            u32 logical_minimum = minimum_size;
-            if (has_flashme) {
-                if (logical_minimum > UINT_MAX - FLASHME_TRAILER) {
-                    print_error("FlashMe layout is too large for a firmware image");
-                    goto cleanup;
-                }
-                logical_minimum += FLASHME_TRAILER;
-            }
-            if (logical_minimum < CAPACITY_UNIT) logical_minimum = CAPACITY_UNIT;
-            if (round_up_u32(logical_minimum, CAPACITY_UNIT, &logical_capacity) != 0) {
-                print_error("automatic firmware capacity is out of range");
+        u32 logical_minimum = minimum_size;
+        if (has_flashme) {
+            if (logical_minimum > UINT_MAX - FLASHME_TRAILER) {
+                print_error("FlashMe layout is too large for a firmware image");
                 goto cleanup;
             }
-            output_size = logical_capacity;
+            logical_minimum += FLASHME_TRAILER;
         }
+        if (logical_minimum < CAPACITY_UNIT) logical_minimum = CAPACITY_UNIT;
+        if (round_up_u32(logical_minimum, CAPACITY_UNIT, &logical_capacity) != 0) {
+            print_error("automatic firmware capacity is out of range");
+            goto cleanup;
+        }
+        output_size = logical_capacity;
     } else {
         logical_capacity = requested_size;
         output_size = logical_capacity;
     }
     if (logical_capacity < CAPACITY_UNIT || logical_capacity % CAPACITY_UNIT != 0) {
         print_error("firmware capacity must be 256 KiB or another 256 KiB multiple");
-        goto cleanup;
-    }
-    if (!has_flashme && output_size != logical_capacity) {
-        print_error("a non-FlashMe firmware image must have a 256 KiB multiple size");
-        goto cleanup;
-    }
-    if (base.data != NULL && base.size > output_size) {
-        print_error("-b base firmware is larger than the selected output size");
         goto cleanup;
     }
     if (has_flashme) {
@@ -3273,7 +2040,6 @@ static int command_explicit_create(int argc, char **argv)
 
     if (blob_alloc(&output, output_size) != 0) goto cleanup;
     memset(output.data, request.fill_byte, output.size);
-    if (base.data != NULL) memcpy(output.data, base.data, base.size);
     memcpy(output.data, header.data, HEADER_BYTES);
     for (i = 0; i < 5; i++) {
         memcpy(output.data + primary_new_offsets[i], primary_parts[i].data, primary_parts[i].size);
@@ -3284,14 +2050,11 @@ static int command_explicit_create(int argc, char **argv)
             memcpy(output.data + flash_new_offsets[i], flash_parts[i].data, flash_parts[i].size);
         }
     }
+    if (write_p345_alignment_padding(&output, primary_new_offsets, primary_parts,
+                                     flash_new_offsets, has_flashme, flash_header_offset) != 0) goto cleanup;
     if (write_file(output_path, output.data, output.size) != 0) goto cleanup;
 
-    printf("Created %s (0x%08X bytes, fill=%02X%s)\n", output_path, output_size, request.fill_byte,
-           base.data != NULL ? ", base preserved" : "");
-    if (has_flashme && output_size != logical_capacity) {
-        printf("  FlashMe logical capacity=0x%08X; retained truncated physical image length\n",
-               logical_capacity);
-    }
+    printf("Created %s (0x%08X bytes, fill=%02X)\n", output_path, output_size, request.fill_byte);
     for (i = 0; i < 5; i++) {
         printf("  P%d offset=0x%06X data=0x%06lX span=0x%06X\n", i + 1,
                primary_new_offsets[i], (unsigned long)primary_parts[i].size, primary_reserved_sizes[i]);
@@ -3308,7 +2071,6 @@ static int command_explicit_create(int argc, char **argv)
 cleanup:
     blob_free(&header);
     blob_free(&flash_header);
-    blob_free(&base);
     blob_free(&output);
     for (i = 0; i < 5; i++) blob_free(&primary_parts[i]);
     for (i = 0; i < 2; i++) blob_free(&flash_parts[i]);

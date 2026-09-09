@@ -35,13 +35,12 @@ static const unsigned short crc16tab[] = {
 	0x8201, 0x42C0, 0x4380, 0x8341, 0x4100, 0x81C1, 0x8081, 0x4040
 };
 
-u16 swiCRC(u16 crc, u32 *r2, u32 r0) {
+u16 swiCRC(u16 crc, const u8 *data, u32 size) {
 	u32 i;
-	
-	for(i = 0; i < r0; i++) {
-		u8 data = *((unsigned char *)r2 + i);
-		crc = (crc >> 8) ^ crc16tab[(crc ^ data) & 0xff];
+
+	for(i = 0; i < size; i++) {
+		crc = (crc >> 8) ^ crc16tab[(crc ^ data[i]) & 0xff];
 	}
-	
+
 	return crc;
 }

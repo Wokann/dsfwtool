@@ -71,6 +71,76 @@ leave the flag bit clear, write input[p], advance by one, and insert that byte.
 Write the completed flag byte into its reserved position. No lookahead or
 Huffman coding is applied to P1/P2.
 
+### KEY1-derived tail word and encrypted-block alignment
+
+The effective LZ stream ends at its last required token. To reproduce the
+official encrypted component, construct its plaintext block padding separately
+before applying KEY1. A four-byte tail word, when required, is derived from the
+complete firmware identifier at header offset `0x08` and the fixed ARM7 BIOS
+KEY1 table. The fixed identifier prefix `4D 41 43` participates in this derivation
+along with the fourth byte.
+
+Read the identifier as a little-endian 32-bit integer and initialize KEY1 with
+`level = 2` and `modulo = 0x0C`. Let K be the completed expanded key table, indexed
+as 32-bit words. Copy K[0] and K[1] into a separate eight-byte block, in that order,
+with each word stored little-endian. Encrypt that block using K and retain the
+first four output bytes:
+
+```text
+id = read_le32(header + 0x08)
+K = KEY1_init(id, level=2, modulo=0x0C)
+B = LE32(K[0]) || LE32(K[1])
+R = KEY1_encrypt_block(K, B)
+tail = R[0:4]
+```
+
+Here `||` means byte concatenation and `R[0:4]` selects bytes 0 through 3.
+K must be fully expanded before the extra block encryption. Encrypt a copy of
+its first two words, leaving the key table unchanged for component encryption.
+This is a deterministic 64-bit result derived from the identifier, with its
+first 32 bits retained in file order; no random seed or per-ID lookup table is
+needed. It is distinct from encrypting an all-zero block with the completed K.
+
+| Identifier bytes | Derived eight bytes, in file order | Tail word bytes |
+| --- | --- | --- |
+| `4D 41 43 50` (`MACP`) | `81 A6 5C B3 99 E1 0E D8` | `81 A6 5C B3` |
+| `4D 41 43 67` (`MACg`) | `02 9D 99 57 6A 4E 90 2B` | `02 9D 99 57` |
+| `4D 41 43 68` (`MACh`) | `AD 89 93 D2 2C 20 76 06` | `AD 89 93 D2` |
+| `4D 41 43 69` (`MACi`) | `5E 25 1E 4B F1 5A ED D4` | `5E 25 1E 4B` |
+| `4D 41 43 C2` (`MAC\xC2`) | `A8 85 A7 8F EA 14 E6 01` | `A8 85 A7 8F` (predicted) |
+
+For example, MACP produces K[0] = `0xFB0FC3DF` and K[1] = `0x7B73F359`.
+The extra encryption therefore takes `DF C3 0F FB 59 F3 73 7B` as its input
+and yields `81 A6 5C B3 99 E1 0E D8`.
+The MAC\xC2 tail remains a prediction: the available iQue v1 P1 and P2 streams
+do not require the extra word, so neither component exposes it.
+
+Let E be the effective compressed byte count and define:
+
+```text
+A4 = 4 * ceil(E / 4)
+A8 = 8 * ceil(E / 8)
+plaintext[0:E] = compressed_stream
+plaintext[E:A4] = zero bytes
+if A4 < A8:
+    plaintext[A4:A8] = tail
+ciphertext = KEY1_encrypt_blocks(K, plaintext[0:A8])
+```
+
+An already eight-byte-aligned stream needs no padding. For `E mod 8` equal to
+1, 2, 3 or 4, append zeros to the four-byte boundary, then the derived word.
+For residues 5, 6 or 7, only zero bytes are needed. P1 and P2 share the derived
+word when they use the same identifier; their compressed contents and lengths
+determine whether that word is present, not its value.
+
+The tail and zero bytes are encrypted together with the effective stream.
+After decryption of the complete ciphertext blocks, an LZ parser can identify
+E and discard the padding; decompression does not consume it. Any further gap
+to the next firmware component belongs to image layout, outside these encrypted
+blocks. The numeric rule reconstructs the observed tail; whether the original
+packer deliberately supplied it or inherited it from a working buffer is not
+established by the rule itself.
+
 ## P3/P4/P5: LZ Matching with Two Static Huffman Streams
 
 ### Stream structure
@@ -326,6 +396,69 @@ b2 = (D - 1) & 0xFF
 随后前进 L 字节，将这 L 个已消耗字节全部加入历史窗口。对于字面量，
 保持对应标志位为零，写入 input[p]，前进一个字节并更新窗口。
 一组处理完毕后，将标志字节写回预留位置。P1/P2 不进行向前观察或 Huffman 编码。
+
+### KEY1 派生尾字与加密块对齐
+
+LZ 有效流在最后一个必要 token 处结束。还原官方加密组件时，需要在应用
+KEY1 前单独构造明文填充区。其中按需出现的四字节尾字，由固件头 `0x08`
+处的完整标识符以及 ARM7 BIOS 固定 KEY1 表派生。标识符的固定前缀
+`4D 41 43` 与第四个字节共同参与计算。
+
+将标识符按小端序读取为 32 位整数，以 `level = 2`、`modulo = 0x0C`
+初始化 KEY1。设 K 为完成扩展后的密钥表，以 32 位字索引。将 K[0] 和
+K[1] 依次以小端序写入一个独立的八字节块，使用 K 加密该块，取输出的
+前四字节：
+
+```text
+id = read_le32(header + 0x08)
+K = KEY1_init(id, level=2, modulo=0x0C)
+B = LE32(K[0]) || LE32(K[1])
+R = KEY1_encrypt_block(K, B)
+tail = R[0:4]
+```
+
+其中 `||` 表示字节拼接，`R[0:4]` 表示第 0 至第 3 字节。
+必须先完成整个密钥表的扩展，再执行这次额外加密；应对表头两个字的副本
+进行加密，保持密钥表不变，以便随后加密组件。这是由标识符确定的 64 位
+结果，按文件顺序保留前 32 位，不需要随机种子或按 ID 查表。
+它与使用完成后的 K 加密全零块是不同的运算。
+
+| 标识符字节 | 派生的八字节结果，按文件顺序 | 尾字字节 |
+| --- | --- | --- |
+| `4D 41 43 50`（`MACP`） | `81 A6 5C B3 99 E1 0E D8` | `81 A6 5C B3` |
+| `4D 41 43 67`（`MACg`） | `02 9D 99 57 6A 4E 90 2B` | `02 9D 99 57` |
+| `4D 41 43 68`（`MACh`） | `AD 89 93 D2 2C 20 76 06` | `AD 89 93 D2` |
+| `4D 41 43 69`（`MACi`） | `5E 25 1E 4B F1 5A ED D4` | `5E 25 1E 4B` |
+| `4D 41 43 C2`（`MAC\xC2`） | `A8 85 A7 8F EA 14 E6 01` | `A8 85 A7 8F`（预测） |
+
+例如，MACP 对应的 K[0] 为 `0xFB0FC3DF`，K[1] 为 `0x7B73F359`。
+因此额外加密的输入为 `DF C3 0F FB 59 F3 73 7B`，输出为
+`81 A6 5C B3 99 E1 0E D8`。
+MAC\xC2 的尾字仍属于预测值：现有 iQue v1 的 P1、P2 压缩流均不需要
+额外四字节尾字，因此这两个组件没有暴露该值。
+
+设有效压缩字节数为 E，填充和加密过程为：
+
+```text
+A4 = 4 * ceil(E / 4)
+A8 = 8 * ceil(E / 8)
+plaintext[0:E] = compressed_stream
+plaintext[E:A4] = 零字节
+如果 A4 < A8：
+    plaintext[A4:A8] = tail
+ciphertext = KEY1_encrypt_blocks(K, plaintext[0:A8])
+```
+
+已经按八字节对齐时不添加填充。`E mod 8` 为 1、2、3、4 时，先补零到
+四字节边界，再追加派生尾字；余数为 5、6、7 时，只需补零。
+相同标识符的 P1、P2 共用一个派生尾字；组件内容和长度决定是否出现
+这个尾字，不决定尾字的数值。
+
+尾字和零填充与有效流一起加密。解密完整密文块后，LZ 解析器可确定 E，
+再裁去填充；解压过程不消耗这些填充字节。到下一固件组件之间如果还有
+空隙，属于这些加密块之外的镜像布局。上述数值规则可以重建已观察到的
+尾字；官方打包器是有意提供这个值，还是从工作缓冲区带入，不能仅凭
+这一数值规则确定。
 
 ## P3/P4/P5：LZ 匹配与双流静态 Huffman 编码
 

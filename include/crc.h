@@ -4,6 +4,14 @@
 
 #include "nds_types.h"
 
-u16 swiCRC(u16 crc, u32 *r2, u32 r0);
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+u16 swiCRC(u16 crc, const u8 *data, u32 size);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

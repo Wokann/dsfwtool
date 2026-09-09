@@ -2,6 +2,12 @@
 #ifndef FIRMWARE_H
 #define FIRMWARE_H
 
+#include "nds_types.h"
+
+#if defined(_MSC_VER) || defined(__GNUC__) || defined(__clang__)
+#pragma pack(push, 1)
+#endif
+
 typedef struct {
 	u16	part3_romaddr;
 	u16	part4_romaddr;
@@ -25,6 +31,14 @@ typedef struct {
 	u16	unused2;
 } FW_HEADER;
 
-#define FW_HEADER_SIZE 0x200
+#if defined(_MSC_VER) || defined(__GNUC__) || defined(__clang__)
+#pragma pack(pop)
+#endif
+
+/* Full firmware header sector, exported header payload, and FlashMe trailer. */
+#define FW_HEADER_SIZE 0x200u
+#define FW_HEADER_DATA_SIZE 0x180u
+#define FW_CAPACITY_UNIT 0x40000u
+#define FW_FLASHME_TRAILER_SIZE 0x980u
 
 #endif

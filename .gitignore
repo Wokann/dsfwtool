@@ -16,6 +16,7 @@ out/
 bin/
 dist/
 release/
+.temp/
 
 # System-specific files
 .DS_Store       # macOS

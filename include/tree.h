@@ -4,16 +4,22 @@
 
 #include "nds_types.h"
 
-typedef struct _NODE NODE, *PNODE;
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 typedef struct _NODE {
-	PNODE left;
-	PNODE right;
-	u32 value;
-	u32 weight;
+    struct _NODE *left;
+    struct _NODE *right;
+    u32 value;
+    u32 weight;
 } NODE, *PNODE;
 
-NODE* node_create(NODE *left, NODE *right, u32 value, u32 weight);
-void free_tree(NODE *node);
+PNODE node_create(PNODE left, PNODE right, u32 value, u32 weight);
+void free_tree(PNODE node);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

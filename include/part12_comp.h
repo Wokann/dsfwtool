@@ -4,9 +4,16 @@
 
 #include "nds_types.h"
 
-#define COMPRESSION_TYPE_LZ77 1
-u32 decompressLZ77(u8 *dst,u8 *src);
-u32 getCompressedLZ77Size(u8 *src);
-u32 compressLZ77(u8 *dst, u8 *src, u32 size);
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+u32 decompressLZ77(u8 *dst, const u8 *src);
+u32 getCompressedLZ77Size(const u8 *src);
+u32 compressLZ77(u8 *dst, const u8 *src, u32 size);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -2,6 +2,8 @@
 #ifndef KEYDATA_H
 #define KEYDATA_H
 
-extern unsigned char keydata[4168];
+#include "nds_types.h"
+
+extern const u8 keydata[4168];
 
 #endif

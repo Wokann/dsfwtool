@@ -2,6 +2,7 @@
 
 #include "encryption.h"
 
+#include <limits.h>
 #include <string.h>
 #include "keydata.h"
 
@@ -90,40 +91,42 @@ void init_keycode (u32 idcode, u32 level, u32 modulo) {
 }
 
 
+/* KEY1 transforms complete 64-bit blocks.  Padding belongs to encrypt_buffer(),
+   before the block transform; decrypt_buffer() rejects truncated blocks. */
 int decrypt_buffer(const u8* src, u8* dest, int src_size) {
-    int pad = (src_size % 8) ? (8 - (src_size % 8)) : 0;
-    int total = src_size + pad;
     u8 block[8];
 
-    for (int i = 0; i < total; i += 8) {
-        if (i + 8 <= src_size) {
-            memcpy(block, src + i, 8);
-        } else {
-            int remain = src_size - i;
-            memcpy(block, src + i, remain);
-            memset(block + remain, 0, 8 - remain);
-        }
+    if (src == NULL || dest == NULL || src_size <= 0 || (src_size & 7) != 0) return -1;
+    for (int i = 0; i < src_size; i += 8) {
+        memcpy(block, src + i, sizeof(block));
         crypt_64bit_down(block);
-        memcpy(dest + i, block, 8);
+        memcpy(dest + i, block, sizeof(block));
     }
-	return total;
+	return src_size;
 }
 
 int encrypt_buffer(const u8* src, u8* dest, int src_size) {
-    int pad = (src_size % 8) ? (8 - (src_size % 8)) : 0;
-    int total = src_size + pad;
-    u8 block[8];
+    int total;
+    u32 block[2];
 
+    if (src == NULL || dest == NULL || src_size <= 0 || src_size > INT_MAX - 7) return -1;
+    total = (src_size + 7) & ~7;
     for (int i = 0; i < total; i += 8) {
-        if (i + 8 <= src_size) {
-            memcpy(block, src + i, 8);
-        } else {
-            int remain = src_size - i;
-            memcpy(block, src + i, remain);
-            memset(block + remain, 0, 8 - remain);
+        int bytes = src_size - i;
+        if (bytes > 8) bytes = 8;
+        memset(block, 0, sizeof(block));
+        if (bytes > 0) memcpy(block, src + i, (size_t)bytes);
+        if (bytes <= 4) {
+            u32 tail[2];
+            /* Complete the first word with zeros, then supply the official
+               ID-derived second word.  Transform a copy of the completed
+               schedule's first block so the component key remains intact. */
+            memcpy(tail, keybuf, sizeof(tail));
+            crypt_64bit_up((u8 *)tail);
+            memcpy((u8 *)block + 4, tail, 4);
         }
-        crypt_64bit_up(block);
-        memcpy(dest + i, block, 8);
+        crypt_64bit_up((u8 *)block);
+        memcpy(dest + i, block, sizeof(block));
     }
 	return total;
 }

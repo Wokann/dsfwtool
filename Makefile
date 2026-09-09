@@ -1,4 +1,4 @@
-# Multi-platform Makefile for the firmware tools.
+# Multi-platform Makefile for dsfwtool.
 # Supports Linux, macOS, and Windows (MinGW/MSYS2).
 
 CC ?= gcc
@@ -17,7 +17,7 @@ RELEASE_DIR = release
 
 EXECUTABLES = dsfwtool
 
-dsfwtool_SRCS = fwtool.cpp encryption.cpp keydata.cpp part12_comp.cpp part345_comp.cpp bitstream.cpp tree.cpp crc.cpp
+dsfwtool_SRCS = dsfwtool.cpp encryption.cpp keydata.cpp part12_comp.cpp part345_comp.cpp bitstream.cpp tree.cpp crc.cpp
 
 dsfwtool_SRCS := $(addprefix $(SRC_DIR)/,$(dsfwtool_SRCS))
 
