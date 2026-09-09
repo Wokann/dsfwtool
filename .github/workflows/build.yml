@@ -36,11 +36,12 @@ jobs:
         shell: msys2 {0}
         run: |
           make clean
-          make EXE_EXT=.exe
+          make EXE_EXT=.exe RUNTIME_LDFLAGS="-static -static-libgcc"
 
-      - name: Verify runtime imports
+      - name: Verify static link flags and runtime imports
         shell: msys2 {0}
         run: |
+          make --no-print-directory -Bn EXE_EXT=.exe RUNTIME_LDFLAGS="-static -static-libgcc" | grep -Fq -- '-static -static-libgcc'
           unexpected="$(objdump -p release/dsfwtool.exe | awk '/DLL Name:/ {print tolower($3)}' | grep -Ev '^(kernel32|msvcrt)\.dll$' || true)"
           if [ -n "$unexpected" ]; then
             printf 'Unexpected runtime imports:\n%s\n' "$unexpected"

@@ -8,13 +8,14 @@
 # uses only the macOS-provided libSystem runtime.
 
 UNAME_S := $(shell uname -s 2>/dev/null)
+WINDOWS_BUILD := $(filter Windows_NT MSYS% MINGW% CYGWIN%,$(OS) $(UNAME_S))
 
 CC ?= gcc
 CFLAGS ?= -Wall -O2 -Iinclude -std=c99
 LDFLAGS ?=
 LDLIBS ?=
 
-ifeq ($(OS),Windows_NT)
+ifneq ($(strip $(WINDOWS_BUILD)),)
 EXE_EXT := .exe
 RUNTIME_LDFLAGS ?= -static -static-libgcc
 else ifeq ($(UNAME_S),Linux)

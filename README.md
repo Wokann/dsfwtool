@@ -1,70 +1,80 @@
 # dsfwtool v1.0
 
-[English](README_EN.md)
+[简体中文](README_ZH.md)
 
-`dsfwtool` 是 Nintendo DS 固件命令行工具。它可显示固件布局、将指定组件导出到
-命名路径、由头部和组件文件创建固件，并单独处理压缩流或加密流。支持 256 KiB
-及其更大整数倍容量的固件。
+`dsfwtool` is a command-line utility for Nintendo DS firmware. It displays a
+firmware layout, exports selected components to named paths, creates a
+firmware image from a header and component files, and processes individual
+compressed or encrypted streams. It accepts firmware capacities of 256 KiB
+and larger multiples of 256 KiB.
 
-## 构建环境
+## Requirements
 
-从源码构建需要 C99 编译器和 GNU Make。随仓库提供的 Makefile 已用 GCC/MinGW
-验证；Clang 也可使用。Windows 下请在已将 `make` 和 C 编译器加入 `PATH` 的终端
-中构建，例如 MSYS2 的 MinGW 终端。Linux、macOS 则先安装平台对应的 C 开发工具和
-GNU Make。
+Building from source requires a C99 compiler and GNU Make. The supplied
+Makefile has been tested with GCC/MinGW; Clang is also suitable. On Windows,
+use a shell with `make` and a C compiler on `PATH` (for example an MSYS2 MinGW
+shell). On Linux and macOS, install the platform's C development tools and
+GNU Make first.
 
-## 编译与安装
+## Build and install
 
-在仓库根目录执行：
+Build from the repository root:
 
 ```text
 make dsfwtool
 ```
 
-Windows 下生成 `release/dsfwtool.exe`，类 Unix 系统下生成
-`release/dsfwtool`。可用下列命令确认构建结果：
+The Windows executable is `release/dsfwtool.exe`; Unix-like builds produce
+`release/dsfwtool`. Verify the build with:
 
 ```text
 release/dsfwtool.exe --version    # Windows
 ./release/dsfwtool --version      # Linux/macOS
 ```
 
-项目没有单独的安装器，也没有 `make install` 目标；编译出的文件可直接运行。若要
-在任意目录直接输入 `dsfwtool`，请将该可执行文件复制到已经位于用户 `PATH` 的目录。
-例如在类 Unix 系统中：
+There is no separate installer or `make install` target. The executable may
+be run in place. To make it available as `dsfwtool` from any directory, copy
+it to a directory already listed in the user's `PATH`. For example, on a
+Unix-like system:
 
 ```text
 install -Dm755 release/dsfwtool "$HOME/.local/bin/dsfwtool"
 ```
 
-随后确认 `$HOME/.local/bin` 已在 `PATH` 中。Windows 下可将
-`release/dsfwtool.exe` 复制到自选目录，将该目录加入用户的 `Path` 环境变量，然后
-重新打开终端。
+Ensure that `$HOME/.local/bin` is in `PATH`. On Windows, copy
+`release/dsfwtool.exe` to a user-selected directory and add that directory to
+the User `Path` environment variable, then open a new terminal.
 
-下文统一以 `dsfwtool` 表示命令；如果尚未加入 `PATH`，请改用
-`release/dsfwtool.exe` 或 `./release/dsfwtool`。
+The examples below use `dsfwtool` as the command name. Substitute
+`release/dsfwtool.exe` or `./release/dsfwtool` when it has not been added to
+`PATH`.
 
-## 路径与输出
+## Paths and output
 
-所有输出参数都是文件路径。路径可包含相对或绝对父目录；父目录不存在时，工具会
-自动逐级创建。输入路径必须已经存在。
+Every output argument is a file path. It may include relative or absolute
+parent directories; missing parents are created automatically. Input paths
+must already exist.
 
-## 组件与布局
+## Firmware components and layout
 
-主固件头通过 `-h` 导出为 0x180 字节文件。它记录五个主组件的起始位置，也包含
-P1/P2 加密所需的参数。P1、P2 的内层是 LZ10/P12 流，外层再进行固件加密；
-P3、P4、P5 直接使用 P345 双静态 Huffman 格式，不带加密层。
+The primary firmware header is exported as a 0x180-byte `-h` file. It records
+the five primary component starts and the parameters needed for P1/P2
+encryption. P1 and P2 use an LZ10/P12 stream followed by the firmware
+encryption layer. P3, P4, and P5 use the P345 dual-static-Huffman format
+directly, with no encryption layer.
 
-FlashMe 固件在“逻辑容量减 0x980”的尾部位置有第二个 0x180 字节头，通过 `-fh`
-表示。它的 FP1、FP2 是未加密的 P12 流。七个组件在物理 ROM 地址中可以交错
-排列，因此创建时会按统一的物理地址顺序重新安排它们，再把各自的新起始位置写回
-主头和 FlashMe 头。
+FlashMe firmware has a second 0x180-byte header (`-fh`) in the trailer at
+logical capacity minus 0x980. Its FP1 and FP2 components are unencrypted P12
+streams. The seven components can be interleaved in physical ROM order, so
+the builder relocates them as one ordered set and writes their resulting
+starts back to the primary and FlashMe headers separately.
 
-部分 FlashMe 转储缺少最后的 0x200 字节设置扇区，物理文件长度会是
-`0x...FE00`；其逻辑容量仍是下一个 256 KiB 边界。创建时总是写出完整逻辑容量；
-可用 `-s` 选择更大的 256 KiB 整数倍容量。
+Some FlashMe dumps omit the final 0x200-byte settings sector and have a
+physical length ending in `0x...FE00`. Their logical capacity is still the
+next 256 KiB boundary. Creation always writes the complete logical capacity;
+use `-s` to select a larger 256 KiB multiple.
 
-## 命令总览
+## Command reference
 
 ```text
 dsfwtool --help
@@ -85,53 +95,79 @@ dsfwtool -c OUTPUT.bin -h HEADER.bin
   -p3 [-comp] FILE -p4 [-comp] FILE -p5 [-comp] FILE
   [-fh FLASH_HEADER.bin -fp1 [-comp] FILE -fp2 [-comp] FILE]
   [-s 256K|512K|1M|auto] [--fill 00|FF]
-  [头部修改参数]
+  [header-edit options]
 
 dsfwtool -p1|-p2|-p3|-p4|-p5|-fp1|-fp2
   (-comp|-uncomp|-crypt|-decrypt) INPUT.bin [-h HEADER.bin] -o OUTPUT.bin
 ```
 
-`-i` 只读取布局信息。`-x` 至少需要指定一个输出文件；不带修饰词时，组件保持
-镜像内的原始形式。P1/P2 的 `-uncomp` 只能出现在 `-decrypt` 后面；若解密 P1
-或 P2，必须在同一条 `-x` 命令中输出 `-h`，因为头部提供密钥材料。
+`-i` reads layout information only. `-x` requires at least one named output.
+With no modifier, an extracted component retains its on-image representation.
+P1/P2 `-uncomp` is valid only after `-decrypt`; if either P1 or P2 is
+decrypted during `-x`, `-h` must be exported in the same command because it
+provides the key material.
 
-`-c` 始终需要 `-h` 与全部 P1 至 P5。只要指定任何 FlashMe 文件，就必须同时
-指定 `-fh`、`-fp1`、`-fp2`。P1/P2 不带修饰词时输入的是已加密 P12 流；
-`-encrypt` 输入已压缩但未加密的 P12 流；`-comp -encrypt` 输入明文并连续压缩、
-加密。P3/P4/P5 仅可用 `-comp` 输入明文。独立 P1/P2 操作中，`-crypt` 是
-`-encrypt` 的同义写法。
+`-c` always requires `-h` and all of P1 through P5. If any FlashMe artifact
+is supplied, `-fh`, `-fp1`, and `-fp2` must all be supplied. P1/P2 with no
+modifier are already encrypted P12 streams. `-encrypt` accepts an
+already-compressed, unencrypted P12 stream; `-comp -encrypt` accepts plaintext
+and performs both stages. P3/P4/P5 use only `-comp` for plaintext. `-crypt`
+is accepted as an alias of `-encrypt` for an independent P1/P2 operation.
 
-`-p1`、`-p2` 选择 P12；`-p3`、`-p4`、`-p5` 选择 P345；`-fp1`、`-fp2` 选择
-未加密 P12。加密与解密仅适用于主 P1/P2，且需要 `-h`。独立 P1/P2 操作可以是
-单一步骤、`-decrypt -uncomp`，或 `-comp -crypt`；P345、FP1、FP2 则必须且只能
-选择 `-comp` 或 `-uncomp` 之一。
+`-p1` and `-p2` select P12. `-p3`, `-p4`, and `-p5` select P345. `-fp1` and
+`-fp2` select unencrypted P12. Encryption and decryption require `-h` and are
+valid only for primary P1/P2. An independent P1/P2 operation may be a single
+stage, `-decrypt -uncomp`, or `-comp -crypt`; P345 and FP1/FP2 require exactly
+one of `-comp` or `-uncomp`.
 
-P1/P2 解密只接受完整的 8 字节对齐密文，并在处理完所有分组后仅导出有效 P12
-流。P1/P2 加密可接受任意非空输入：已经 8 字节对齐的输入会原样进入加密；否则
-加密层只在内部为最后一个不完整分组补 `00`。因此，若需要保留已知的官方尾部字节，
-可将它们作为已对齐 P12 输入的一部分提供给 `-encrypt` 或 `-crypt`。
+P1/P2 decryption accepts only complete, 8-byte-aligned ciphertext and exports
+only the effective P12 stream after processing its blocks. P1/P2 encryption
+accepts any non-empty input: an already aligned input is transformed unchanged,
+whereas a partial final block is internally completed before encryption. It is
+zero-filled to a four-byte boundary and, if another word is needed to reach
+eight-byte alignment, that word is derived from the header's full ID using KEY1.
+Explicit tail bytes in an already aligned P12 input are preserved. See the
+[tail derivation](docs/compression-reconstruction.md#key1-derived-tail-word-and-encrypted-block-alignment)
+for the encoding rule.
 
-## 查看固件信息
+## Examples
+
+### Inspect a firmware image
 
 ```text
 dsfwtool -i firmware.bin
 dsfwtool -i firmware.bin -o reports/layout.txt
 ```
 
-`-i` 不导出组件。它会显示或写出主组件偏移、有效压缩长度、解码后的对齐值，并在
-存在时显示已识别的 FlashMe 次级布局。
+The report includes component offsets, effective compressed sizes, decoded
+alignment values, and a recognised FlashMe secondary layout when present.
 
-## 导出组件
-
-不带修饰词时，组件按镜像内原始形式导出：
+### Export raw components and rebuild from them
 
 ```text
 dsfwtool -x firmware.bin -h unpack/header.bin \
   -p1 unpack/p1.encrypted -p2 unpack/p2.encrypted \
   -p3 unpack/p3.p345 -p4 unpack/p4.p345 -p5 unpack/p5.p345
+
+dsfwtool -c rebuilt.bin -h unpack/header.bin \
+  -p1 unpack/p1.encrypted -p2 unpack/p2.encrypted \
+  -p3 unpack/p3.p345 -p4 unpack/p4.p345 -p5 unpack/p5.p345
 ```
 
-导出明文时：
+Unused output bytes are `FF` by default; use `--fill 00` or `--fill FF` to
+select the fill byte. Omitting `-s`, or using `-s auto`, selects the smallest
+256 KiB multiple that fits every component. `-s 256K`, `-s 512K`, and `-s 1M`
+select a capacity explicitly. Choose a larger explicit `-s` if recompressed
+FlashMe streams no longer fit their original layout.
+
+Exported P3, P4, and P5 files contain only their effective P345 bitstreams.
+While assembling an image, packing writes `00` from each such stream through
+its next 8-byte boundary, without overwriting a following component or the
+FlashMe trailer header. This padding is not part of the component file and is
+not controlled by `--fill`. P1/P2 8-byte padding instead belongs to their
+encryption layer.
+
+### Export plaintext components
 
 ```text
 dsfwtool -x firmware.bin -h unpack/header.bin \
@@ -142,48 +178,33 @@ dsfwtool -x firmware.bin -h unpack/header.bin \
   -p5 -uncomp unpack/p5.plain
 ```
 
-P1/P2 的 `-uncomp` 只能紧跟在 `-decrypt` 后面。若 `-x` 中请求解密 P1 或 P2，
-必须同时导出 `-h`，因为该头部提供密钥材料。`-x` 可以只导出需要的组件。
-
-对于 FlashMe 镜像，可按需加入次级组件：
+`-x` may name only the components needed for the task. For a FlashMe image,
+selected secondary artifacts use `-fh`, `-fp1`, and `-fp2`:
 
 ```text
 dsfwtool -x flashme.bin -fh unpack/flash-header.bin \
   -fp1 unpack/fp1.p12 -fp2 -uncomp unpack/fp2.plain
 ```
 
-FP1、FP2 不支持加密参数。
-
-## 创建固件
-
-创建操作始终需要主头和全部五个主组件：
+### Work on an independent P12 or P345 stream
 
 ```text
-dsfwtool -c rebuilt.bin -h unpack/header.bin \
-  -p1 unpack/p1.encrypted -p2 unpack/p2.encrypted \
-  -p3 unpack/p3.p345 -p4 unpack/p4.p345 -p5 unpack/p5.p345
+dsfwtool -p1 -decrypt p1.encrypted -h header.bin -o work/p1.p12
+dsfwtool -p1 -uncomp work/p1.p12 -o work/p1.plain
+dsfwtool -p1 -comp -crypt work/p1.plain -h header.bin -o output/p1.encrypted
+
+dsfwtool -p3 -uncomp p3.p345 -o work/p3.plain
+dsfwtool -p3 -comp work/p3.plain -o output/p3.p345
 ```
 
-未使用的输出空间默认填充 `FF`，可用 `--fill 00` 或 `--fill FF` 指定。省略 `-s`
-或使用 `-s auto` 时，工具选择能容纳所有组件的最小 256 KiB 整数倍；`-s 256K`、
-`-s 512K`、`-s 1M` 可显式选择容量。当重压缩后的 FlashMe 流无法装入原有布局时，
-应显式选择更大的 `-s`。
+The combined P1/P2 forms avoid a named intermediate file:
 
-P3、P4、P5 的导出文件只保存有效 P345 位流。组装镜像时，工具会从每个此类位流的
-有效末尾写入 `00`，直至下一个 8 字节边界；它不会覆盖后续组件或 FlashMe 尾部头。
-该填充不属于组件文件，也不受 `--fill` 影响。P1、P2 的 8 字节填充则属于加密层本身：
-先补零到 4 字节边界，若距离 8 字节对齐还差一个字，则由头部完整 ID 通过 KEY1
-计算该尾字，再将填充和有效流一起加密。已按 8 字节对齐的输入会保留其显式尾字。
-具体规则见[尾字派生说明](docs/compression-reconstruction.md#key1-派生尾字与加密块对齐)。
+```text
+dsfwtool -p2 -decrypt -uncomp p2.encrypted -h header.bin -o work/p2.plain
+dsfwtool -p2 -comp -crypt work/p2.plain -h header.bin -o output/p2.encrypted
+```
 
-主组件的输入模式如下：
-
-| 组件 | 不带修饰词 | `-encrypt` | `-comp -encrypt` |
-| --- | --- | --- | --- |
-| P1/P2 | 已加密的 P12 流 | 已压缩、未加密的 P12 流 | 明文先压缩，再加密 |
-| P3/P4/P5 | P345 流 | 不可用 | 仅使用 `-comp` 输入明文 |
-
-例如，全部由明文重新构建主组件：
+### Build a firmware image from plaintext components
 
 ```text
 dsfwtool -c rebuilt.bin -s 512K -h unpack/header.bin \
@@ -194,7 +215,7 @@ dsfwtool -c rebuilt.bin -s 512K -h unpack/header.bin \
   -p5 -comp unpack/p5.plain
 ```
 
-创建 FlashMe 输出时，三个次级文件必须同时提供：
+### Build a FlashMe image
 
 ```text
 dsfwtool -c flashme-rebuilt.bin -s 512K \
@@ -205,33 +226,15 @@ dsfwtool -c flashme-rebuilt.bin -s 512K \
   -fp1 -comp unpack/fp1.plain -fp2 -comp unpack/fp2.plain
 ```
 
-FP1/FP2 不带修饰词时输入的是已有未加密 P12 流，带 `-comp` 时输入明文。
-FlashMe 的兼容性以解压后的数据和最终布局为准，不要求压缩字节与已有流逐字节
-一致。
+For FP1/FP2, no modifier accepts an existing unencrypted P12 stream and
+`-comp` accepts plaintext. FlashMe compatibility is determined by the
+decompressed data and resulting layout; its compressed bytes need not match a
+previous stream.
 
-## 单独处理压缩或加密流
+## Header edits during creation
 
-先选择组件类型。P1/P2 自动选择 P12 编解码器，只有加密或解密时需要 `-h`：
-
-```text
-dsfwtool -p1 -uncomp p1.p12 -o output/p1.plain
-dsfwtool -p1 -decrypt p1.encrypted -h header.bin -o output/p1.p12
-dsfwtool -p2 -decrypt -uncomp p2.encrypted -h header.bin -o output/p2.plain
-dsfwtool -p1 -comp p1.plain -o output/p1.p12
-dsfwtool -p1 -comp -crypt p1.plain -h header.bin -o output/p1.encrypted
-dsfwtool -p3 -uncomp p3.p345 -o output/p3.plain
-dsfwtool -p3 -comp p3.plain -o output/p3.p345
-dsfwtool -fp1 -uncomp fp1.p12 -o output/fp1.plain
-dsfwtool -fp1 -comp fp1.plain -o output/fp1.p12
-```
-
-`-p3`、`-p4`、`-p5` 自动选择 P345；`-fp1`、`-fp2` 自动选择未加密 P12。
-P345 与 FlashMe 流会拒绝加密参数。
-
-## 创建时修改头部
-
-以下参数会在 P1/P2 加密之前修改所提供的主头。创建 FlashMe 时，相同修改也会
-应用到 `-fh`：
+The following options modify the supplied primary header before P1/P2
+encryption. For FlashMe creation, the same edits are also applied to `-fh`.
 
 ```text
 --identifier ABCD
@@ -246,10 +249,13 @@ P345 与 FlashMe 流会拒绝加密参数。
 --set-u32 OFFSET VALUE
 ```
 
-`--timestamp` 也接受 `YYYY-MM-DDTHH:MM`。通用 `--set-*` 的偏移相对于导出的
-0x180 字节头文件。工具会依据最终布局写入 ROM 组件起始位置；若头中声明了 Wi-Fi
-配置校验区，也会重新计算其校验和。普通固件还会重新计算三组主组件 CRC16；
-FlashMe 创建则保留主头和次级头中提供的组件 CRC16 字段。
+`VALUE` and `OFFSET` accept the numeric syntax recognised by the tool.
+`--timestamp` also accepts `YYYY-MM-DDTHH:MM`. Generic `--set-*` offsets are
+relative to the exported 0x180-byte header. The tool writes component ROM
+starts from the final layout and recalculates the declared Wi-Fi configuration
+checksum. For a normal firmware it also derives the three primary component
+CRC16 values. FlashMe creation preserves the component CRC16 fields supplied
+by its primary and secondary headers.
 
-P12、P345 的详细位流结构与编码规则见
-[压缩结构说明](docs/compression-reconstruction.md)。
+For detailed P12 and P345 bitstream structures and encoding rules, see
+[Compression Structures and Encoding Rules](docs/compression-reconstruction.md).
