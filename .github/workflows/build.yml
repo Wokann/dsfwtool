@@ -1,0 +1,117 @@
+name: Build dsfwtool
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    name: Windows ${{ matrix.arch }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86
+            msystem: MINGW32
+            mingw_arch: i686
+          - arch: x64
+            msystem: MINGW64
+            mingw_arch: x86_64
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up MSYS2 and MinGW-w64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+          install: >-
+            make
+            mingw-w64-${{ matrix.mingw_arch }}-gcc
+
+      - name: Build
+        shell: msys2 {0}
+        run: |
+          make clean
+          make EXE_EXT=.exe
+
+      - name: Verify runtime imports
+        shell: msys2 {0}
+        run: |
+          unexpected="$(objdump -p release/dsfwtool.exe | awk '/DLL Name:/ {print tolower($3)}' | grep -Ev '^(kernel32|msvcrt)\.dll$' || true)"
+          if [ -n "$unexpected" ]; then
+            printf 'Unexpected runtime imports:\n%s\n' "$unexpected"
+            exit 1
+          fi
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsfwtool-windows-${{ matrix.arch }}
+          path: release/dsfwtool.exe
+          if-no-files-found: error
+
+  unix:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            runner: ubuntu-24.04
+            cc: gcc
+            platform: linux
+            expected_arch: x86-64
+            artifact: dsfwtool-linux-x86_64
+          - name: Linux arm64
+            runner: ubuntu-24.04-arm
+            cc: gcc
+            platform: linux
+            expected_arch: aarch64
+            artifact: dsfwtool-linux-arm64
+          - name: macOS universal
+            runner: macos-latest
+            cc: clang
+            platform: macos
+            artifact: dsfwtool-macos-universal
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          make clean
+          make CC=${{ matrix.cc }}
+
+      - name: Verify Linux binary
+        if: matrix.platform == 'linux'
+        run: |
+          file release/dsfwtool
+          file release/dsfwtool | grep -q 'statically linked'
+          file release/dsfwtool | grep -q '${{ matrix.expected_arch }}'
+
+      - name: Verify macOS universal binary
+        if: matrix.platform == 'macos'
+        run: |
+          architectures="$(lipo -archs release/dsfwtool)"
+          printf 'Architectures: %s\n' "$architectures"
+          printf '%s\n' "$architectures" | grep -qw x86_64
+          printf '%s\n' "$architectures" | grep -qw arm64
+          for arch in x86_64 arm64; do
+            unexpected="$(otool -L -arch "$arch" release/dsfwtool | tail -n +2 | awk '{print $1}' | grep -Ev '^/usr/lib/libSystem\.B\.dylib$' || true)"
+            if [ -n "$unexpected" ]; then
+              printf 'Unexpected non-system dependencies for %s:\n%s\n' "$arch" "$unexpected"
+              exit 1
+            fi
+          done
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: release/dsfwtool
+          if-no-files-found: error
