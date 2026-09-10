@@ -44,6 +44,9 @@
 #define MAX_HEADER_EDITS 32
 #define MAX_RANGES 10
 #define MAX_RELOCATED_COMPONENTS 7
+#define WIFI_ACCESS_POINT_BYTES 0x400u
+#define USER_SETTINGS_BYTES 0x200u
+#define SETTINGS_TAIL_BYTES (WIFI_ACCESS_POINT_BYTES + USER_SETTINGS_BYTES)
 
 typedef struct {
     u8 *data;
@@ -877,6 +880,71 @@ static int read_header_file(const char *path, Blob *header)
     return 0;
 }
 
+/* The user-settings pointer names the first of two 0x100-byte settings
+   sectors.  The preceding 0x400 bytes hold the three Wi-Fi access-point
+   sectors and their adjacent reserved sector.  Treat all six sectors as one
+   unit so a base image can safely transfer per-console state when its output
+   capacity changes. */
+static int get_base_settings_tail(const Blob *base, u32 *source_offset, u32 *source_size)
+{
+    const FW_HEADER *header;
+    u32 user_settings_start;
+    u32 tail_start;
+    u32 available;
+
+    if (base->size < HEADER_BYTES || base->size > UINT_MAX) {
+        print_error("base firmware is too small or too large");
+        return -1;
+    }
+    header = (const FW_HEADER *)base->data;
+    user_settings_start = (u32)header->user_settings_offset * 8u;
+    if (user_settings_start < WIFI_ACCESS_POINT_BYTES || user_settings_start > base->size) {
+        print_error("base firmware has an invalid user-settings offset 0x%04X",
+                    header->user_settings_offset);
+        return -1;
+    }
+    tail_start = user_settings_start - WIFI_ACCESS_POINT_BYTES;
+    available = (u32)base->size - tail_start;
+    if (available < WIFI_ACCESS_POINT_BYTES) {
+        print_error("base firmware does not contain its Wi-Fi settings area");
+        return -1;
+    }
+    if (available > SETTINGS_TAIL_BYTES) available = SETTINGS_TAIL_BYTES;
+    *source_offset = tail_start;
+    *source_size = available;
+    return 0;
+}
+
+static int trailing_settings_location(u32 capacity, u32 *tail_offset,
+                                      u16 *user_settings_offset)
+{
+    u32 user_settings_start;
+
+    if (capacity < SETTINGS_TAIL_BYTES) {
+        print_error("firmware capacity is too small for Wi-Fi and user settings");
+        return -1;
+    }
+    user_settings_start = capacity - USER_SETTINGS_BYTES;
+    if (user_settings_start / 8u > 0xFFFFu) {
+        print_error("firmware capacity 0x%08X cannot represent a trailing user-settings address",
+                    capacity);
+        return -1;
+    }
+    *tail_offset = user_settings_start - WIFI_ACCESS_POINT_BYTES;
+    *user_settings_offset = (u16)(user_settings_start / 8u);
+    return 0;
+}
+
+static int set_header_user_settings_offset(Blob *header_blob, u16 user_settings_offset)
+{
+    if (header_blob->size < HEADER_BYTES) {
+        print_error("header is smaller than 0x%X bytes", HEADER_BYTES);
+        return -1;
+    }
+    write_le16(header_blob->data + offsetof(FW_HEADER, user_settings_offset), user_settings_offset);
+    return 0;
+}
+
 static int decode_p12(const u8 *compressed, size_t compressed_size, Blob *plain)
 {
     u32 decompressed_size;
@@ -1100,21 +1168,53 @@ cleanup:
     return result;
 }
 
-static int build_relocated_positions_aligned(const u32 *original_offsets, const u32 *alignments,
-                                             const u32 *reserved_sizes, int count, u32 *new_offsets)
+static int build_relocated_positions_with_overrides(const u32 *original_offsets,
+                                                    const u32 *alignments,
+                                                    const u32 *reserved_sizes,
+                                                    const int *has_override,
+                                                    const u32 *override_offsets,
+                                                    int count, u32 *new_offsets)
 {
     int indices[MAX_RELOCATED_COMPONENTS];
+    u32 sort_offsets[MAX_RELOCATED_COMPONENTS];
+    int placed[MAX_RELOCATED_COMPONENTS];
     int i;
 
     if (count <= 0 || count > MAX_RELOCATED_COMPONENTS) return -1;
-    sort_indices_by_offset(original_offsets, count, indices);
+    for (i = 0; i < count; i++) {
+        int fixed = has_override != NULL && has_override[i];
+        if (alignments[i] == 0) {
+            print_error("component %d has an invalid alignment", i + 1);
+            return -1;
+        }
+        placed[i] = fixed;
+        if (fixed) {
+            /* Do not reject a low address here.  The range table below owns
+               the diagnostic for a component that intersects the primary
+               header, so callers receive the useful "overlaps primary
+               header" error rather than a generic bad-offset message. */
+            if (override_offsets == NULL ||
+                override_offsets[i] % alignments[i] != 0) {
+                print_error("component %d has an invalid explicit offset", i + 1);
+                return -1;
+            }
+            new_offsets[i] = override_offsets[i];
+            sort_offsets[i] = override_offsets[i];
+        } else {
+            if (original_offsets[i] < HEADER_BYTES) {
+                print_error("component %d has an invalid original offset", i + 1);
+                return -1;
+            }
+            sort_offsets[i] = original_offsets[i];
+        }
+    }
+    sort_indices_by_offset(sort_offsets, count, indices);
     for (i = 0; i < count; i++) {
         int index = indices[i];
         u32 candidate;
-        if (original_offsets[index] < HEADER_BYTES) {
-            print_error("component %d has an invalid original offset", index + 1);
-            return -1;
-        }
+        int j;
+
+        if (placed[index]) continue;
         if (i == 0) {
             candidate = original_offsets[index];
         } else {
@@ -1126,10 +1226,33 @@ static int build_relocated_positions_aligned(const u32 *original_offsets, const 
             candidate = new_offsets[previous] + reserved_sizes[previous];
             if (candidate < original_offsets[index]) candidate = original_offsets[index];
         }
-        if (round_up_u32(candidate, alignments[index], &new_offsets[index]) != 0) {
-            print_error("component layout cannot be aligned");
-            return -1;
+
+        for (;;) {
+            u32 end;
+            u32 conflict_end = 0;
+            if (round_up_u32(candidate, alignments[index], &candidate) != 0 ||
+                reserved_sizes[index] > UINT_MAX - candidate) {
+                print_error("component layout cannot be aligned");
+                return -1;
+            }
+            end = candidate + reserved_sizes[index];
+            for (j = 0; j < count; j++) {
+                u32 other_end;
+                if (j == index || !placed[j]) continue;
+                if (reserved_sizes[j] > UINT_MAX - new_offsets[j]) {
+                    print_error("component layout exceeds the firmware address space");
+                    return -1;
+                }
+                other_end = new_offsets[j] + reserved_sizes[j];
+                if (candidate < other_end && new_offsets[j] < end && other_end > conflict_end) {
+                    conflict_end = other_end;
+                }
+            }
+            if (conflict_end == 0) break;
+            candidate = conflict_end;
         }
+        new_offsets[index] = candidate;
+        placed[index] = 1;
     }
     return 0;
 }
@@ -1143,15 +1266,21 @@ static int build_relocated_positions_aligned(const u32 *original_offsets, const 
 static int build_flashme_combined_positions(const u32 primary_original_offsets[5],
                                             const u32 primary_alignments[5],
                                             const u32 primary_sizes[5],
+                                            const int primary_has_override[5],
+                                            const u32 primary_override_offsets[5],
                                             const u32 flash_original_offsets[2],
                                             const u32 flash_alignments[2],
                                             const u32 flash_sizes[2],
+                                            const int flash_has_override[2],
+                                            const u32 flash_override_offsets[2],
                                             u32 primary_new_offsets[5],
                                             u32 flash_new_offsets[2])
 {
     u32 original_offsets[MAX_RELOCATED_COMPONENTS];
     u32 alignments[MAX_RELOCATED_COMPONENTS];
     u32 sizes[MAX_RELOCATED_COMPONENTS];
+    u32 override_offsets[MAX_RELOCATED_COMPONENTS];
+    int has_override[MAX_RELOCATED_COMPONENTS];
     u32 new_offsets[MAX_RELOCATED_COMPONENTS];
     int i;
 
@@ -1159,14 +1288,19 @@ static int build_flashme_combined_positions(const u32 primary_original_offsets[5
         original_offsets[i] = primary_original_offsets[i];
         alignments[i] = primary_alignments[i];
         sizes[i] = primary_sizes[i];
+        has_override[i] = primary_has_override[i];
+        override_offsets[i] = primary_override_offsets[i];
     }
     for (i = 0; i < 2; i++) {
         original_offsets[5 + i] = flash_original_offsets[i];
         alignments[5 + i] = flash_alignments[i];
         sizes[5 + i] = flash_sizes[i];
+        has_override[5 + i] = flash_has_override[i];
+        override_offsets[5 + i] = flash_override_offsets[i];
     }
-    if (build_relocated_positions_aligned(original_offsets, alignments, sizes,
-                                          MAX_RELOCATED_COMPONENTS, new_offsets) != 0) {
+    if (build_relocated_positions_with_overrides(original_offsets, alignments, sizes,
+                                                 has_override, override_offsets,
+                                                 MAX_RELOCATED_COMPONENTS, new_offsets) != 0) {
         return -1;
     }
     for (i = 0; i < 5; i++) primary_new_offsets[i] = new_offsets[i];
@@ -1258,16 +1392,29 @@ static void print_usage(void)
     printf("\n");
     printf("Create an official firmware image:\n");
     printf("  dsfwtool -c OUTPUT.bin -h HEADER.bin\n");
-    printf("      -p1 [-encrypt | -comp -encrypt] FILE\n");
-    printf("      -p2 [-encrypt | -comp -encrypt] FILE\n");
-    printf("      -p3 [-comp] FILE -p4 [-comp] FILE -p5 [-comp] FILE\n");
-    printf("      [-s 256K|512K|1M|auto] [--fill 00|FF]\n");
+    printf("      -p1 [-encrypt | -comp -encrypt] [--offset OFFSET] FILE\n");
+    printf("      -p2 [-encrypt | -comp -encrypt] [--offset OFFSET] FILE\n");
+    printf("      -p3 [-comp] [--offset OFFSET] FILE  -p4 [-comp] [--offset OFFSET] FILE\n");
+    printf("      -p5 [-comp] [--offset OFFSET] FILE\n");
+    printf("      [-fh [--offset OFFSET] FLASH_HEADER.bin\n");
+    printf("       -fp1 [-comp] [--offset OFFSET] FILE -fp2 [-comp] [--offset OFFSET] FILE]\n");
+    printf("      [-b BASE.bin] [-s 256K|512K|1M|auto] [--fill 00|FF]\n");
     printf("  P1/P2 with no modifier are already encrypted P12 streams.  -encrypt\n");
     printf("  encrypts an already compressed P12 stream; -comp -encrypt compresses\n");
     printf("  plain data before encryption.  P3/P4/P5 -comp uses P345 compression.\n");
     printf("  P3/P4/P5 effective streams are zero-padded through the next 8-byte boundary\n");
     printf("  while assembling the image; that padding is not part of an exported component.\n");
+    printf("  In -c, --offset pins P1--P5, -fh, -fp1, or -fp2 at a physical ROM byte\n");
+    printf("  address.  P/FP starts must meet their header alignment.  The packed\n");
+    printf("  (compressed/encrypted) size is used for overlap checks and header offsets\n");
+    printf("  are rewritten automatically.  The primary header occupies 0x000000--0x00017F.\n");
+    printf("  Normal firmware reserves its final 0x600 bytes; FlashMe reserves only its\n");
+    printf("  secondary 0x180-byte header and final 0x200 user-settings bytes.\n");
+    printf("  Without -fh --offset, FlashMe uses capacity minus 0x980 (0x3F680 at 256 KiB,\n");
+    printf("  0x7F680 at 512 KiB) for compatibility.\n");
     printf("  Unused output bytes are filled with FF by default (override with --fill).\n");
+    printf("  -b transfers the base firmware's 0x600-byte settings tail (through 512 KiB).\n");
+    printf("  In FlashMe mode, components may deliberately replace its Wi-Fi-area bytes.\n");
     printf("\n");
     printf("Independent component operations:\n");
     printf("  dsfwtool -p1 -comp INPUT.bin -o OUTPUT.bin\n");
@@ -1281,7 +1428,7 @@ static void print_usage(void)
     printf("  -p1/-p2 select P12; -p3/-p4/-p5 select P345 automatically.\n");
     printf("  P1/P2 crypt/decrypt requires -h because fw_identifier supplies the key.\n");
     printf("  Decryption requires a complete 8-byte-aligned ciphertext and writes only the effective P12 stream;\n");
-    printf("  encryption preserves an aligned input and zero-pads only a partial final block.\n");
+    printf("  encryption preserves an aligned input and completes a partial final block internally.\n");
     printf("\n");
     printf("FlashMe components (select as needed with -x; supply all three with -c):\n");
     printf("  -fh FLASH_HEADER.bin  -fp1 [-comp|-uncomp] FILE  -fp2 [-comp|-uncomp] FILE\n");
@@ -1316,6 +1463,8 @@ enum {
 
 typedef struct {
     const char *path;
+    int has_offset;
+    u32 offset;
     int compress;
     int encrypt;
     int decrypt;
@@ -1324,6 +1473,7 @@ typedef struct {
 
 typedef struct {
     ExplicitComponent components[FWCOMP_COUNT];
+    const char *base_path;
     const char *size_text;
     u8 fill_byte;
     HeaderEdits edits;
@@ -1424,6 +1574,7 @@ static int parse_explicit_component(int argc, char **argv, int *index, int creat
 {
     int component = explicit_component_kind(argv[*index]);
     ExplicitComponent *entry;
+    u32 offset;
 
     if (component < 0) return -1;
     entry = &request->components[component];
@@ -1474,6 +1625,27 @@ static int parse_explicit_component(int argc, char **argv, int *index, int creat
         }
     }
 
+    if (*index < argc && strcmp(argv[*index], "--offset") == 0) {
+        const char *value;
+        if (!create) {
+            print_error("%s --offset is only valid with -c", explicit_component_name(component));
+            return -1;
+        }
+        if (component == FWCOMP_HEADER) {
+            print_error("the primary header is fixed at physical offset 0x000000");
+            return -1;
+        }
+        if (entry->has_offset) {
+            print_error("%s offset is specified more than once", explicit_component_name(component));
+            return -1;
+        }
+        if (take_option_value(argc, argv, index, "--offset", &value) != 0 ||
+            parse_u32(value, &offset) != 0) return -1;
+        entry->has_offset = 1;
+        entry->offset = offset;
+        ++*index;
+    }
+
     if (*index >= argc || argv[*index][0] == '-') {
         print_error("%s requires an explicit filename", explicit_component_name(component));
         return -1;
@@ -1495,6 +1667,14 @@ static int parse_explicit_firmware_request(int argc, char **argv, int first_opti
 
         if (component >= 0) {
             if (parse_explicit_component(argc, argv, &i, create, request) != 0) return -1;
+            continue;
+        }
+        if (create && strcmp(argv[i], "-b") == 0) {
+            if (request->base_path != NULL) {
+                print_error("-b is specified more than once");
+                return -1;
+            }
+            if (take_option_value(argc, argv, &i, "-b", &request->base_path) != 0) return -1;
             continue;
         }
         if (create && (strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "--size") == 0)) {
@@ -1610,12 +1790,13 @@ static int max_reserved_end(const u32 *offsets, const u32 *reserved_sizes, int c
    alignment bytes.  Keep those bytes out of exported component files, then
    synthesize zeroes through the next 8-byte boundary while assembling the
    image.  The boundary must never overwrite a following component or the
-   FlashMe trailer header.  P1/P2 are different: their encryption layer owns
+   FlashMe secondary header or protected settings tail.  P1/P2 are different: their encryption layer owns
    the corresponding 8-byte padding. */
 static int write_p345_alignment_padding(Blob *output, const u32 primary_offsets[5],
                                         const Blob primary_parts[5],
                                         const u32 flash_offsets[2], int has_flashme,
-                                        u32 flash_header_offset)
+                                        u32 flash_header_offset,
+                                        u32 protected_tail_offset)
 {
     int i;
 
@@ -1648,6 +1829,9 @@ static int write_p345_alignment_padding(Blob *output, const u32 primary_offsets[
             if (flash_header_offset > end && flash_header_offset < next_start) {
                 next_start = flash_header_offset;
             }
+        }
+        if (protected_tail_offset > end && protected_tail_offset < next_start) {
+            next_start = protected_tail_offset;
         }
         if (next_start != UINT_MAX && padded_end > next_start) padded_end = next_start;
         if (padded_end > output->size) {
@@ -1883,6 +2067,7 @@ static int command_explicit_create(int argc, char **argv)
     ExplicitFirmwareRequest request;
     Blob header;
     Blob flash_header;
+    Blob base;
     Blob primary_parts[5];
     Blob flash_parts[2];
     Blob output;
@@ -1892,20 +2077,34 @@ static int command_explicit_create(int argc, char **argv)
     u32 primary_alignments[5];
     u32 primary_reserved_sizes[5];
     u32 primary_new_offsets[5];
+    int primary_has_override[5];
+    u32 primary_override_offsets[5];
     u32 flash_original_offsets[2];
     u32 flash_alignments[2];
     u32 flash_reserved_sizes[2];
     u32 flash_new_offsets[2];
+    int flash_has_override[2];
+    u32 flash_override_offsets[2];
     u32 primary_end;
     u32 flash_end = HEADER_BYTES;
     u32 minimum_size;
     u32 logical_capacity;
     u32 output_size;
     u32 flash_header_offset = 0;
-    u32 flash_trailer_size = 0;
+    u32 flash_header_size = 0;
+    u32 base_settings_tail_offset = 0;
+    u32 base_settings_tail_size = 0;
+    u32 base_copy_source_offset = 0;
+    u32 base_copy_target_offset = 0;
+    u32 base_copy_size = 0;
+    u32 base_copy_expected_size = 0;
+    u32 protected_tail_offset = 0;
+    u32 protected_tail_size = 0;
     u32 requested_size = 0;
+    u16 target_user_settings_offset = 0;
     int automatic_size = 1;
     int has_flashme;
+    int flash_header_has_override = 0;
     FirmwareRange ranges[MAX_RANGES];
     int range_count = 0;
     int i;
@@ -1913,6 +2112,7 @@ static int command_explicit_create(int argc, char **argv)
 
     blob_init(&header);
     blob_init(&flash_header);
+    blob_init(&base);
     blob_init(&output);
     for (i = 0; i < 5; i++) blob_init(&primary_parts[i]);
     for (i = 0; i < 2; i++) blob_init(&flash_parts[i]);
@@ -1924,6 +2124,11 @@ static int command_explicit_create(int argc, char **argv)
     output_path = argv[2];
     if (parse_explicit_firmware_request(argc, argv, 3, 1, &request) != 0 ||
         validate_explicit_firmware_request(&request, 1) != 0) goto cleanup;
+    if (request.base_path != NULL &&
+        (read_file(request.base_path, &base) != 0 ||
+         get_base_settings_tail(&base, &base_settings_tail_offset, &base_settings_tail_size) != 0)) {
+        goto cleanup;
+    }
     if (read_header_file(request.components[FWCOMP_HEADER].path, &header) != 0 ||
         apply_header_edits(&header, &request.edits) != 0) goto cleanup;
     primary_header = (FW_HEADER *)header.data;
@@ -1935,9 +2140,12 @@ static int command_explicit_create(int argc, char **argv)
             component_span(&primary_parts[i], &primary_reserved_sizes[i]) != 0) goto cleanup;
         primary_original_offsets[i] = primary_part_offset(primary_header, i);
         primary_alignments[i] = primary_part_alignment(primary_header, i);
+        primary_has_override[i] = request.components[component].has_offset;
+        primary_override_offsets[i] = request.components[component].offset;
     }
     has_flashme = request.components[FWCOMP_FLASH_HEADER].path != NULL;
     if (has_flashme) {
+        flash_header_has_override = request.components[FWCOMP_FLASH_HEADER].has_offset;
         if (read_header_file(request.components[FWCOMP_FLASH_HEADER].path, &flash_header) != 0 ||
             apply_header_edits(&flash_header, &request.edits) != 0) goto cleanup;
         secondary_header = (FW_HEADER *)flash_header.data;
@@ -1948,14 +2156,19 @@ static int command_explicit_create(int argc, char **argv)
                 component_span(&flash_parts[i], &flash_reserved_sizes[i]) != 0) goto cleanup;
             flash_original_offsets[i] = flashme_part_offset(secondary_header, i);
             flash_alignments[i] = flashme_part_alignment(secondary_header, i);
+            flash_has_override[i] = request.components[component].has_offset;
+            flash_override_offsets[i] = request.components[component].offset;
         }
         if (build_flashme_combined_positions(primary_original_offsets, primary_alignments,
-                                             primary_reserved_sizes, flash_original_offsets,
+                                             primary_reserved_sizes, primary_has_override,
+                                             primary_override_offsets, flash_original_offsets,
                                              flash_alignments, flash_reserved_sizes,
+                                             flash_has_override, flash_override_offsets,
                                              primary_new_offsets, flash_new_offsets) != 0) goto cleanup;
-    } else if (build_relocated_positions_aligned(primary_original_offsets, primary_alignments,
-                                                 primary_reserved_sizes, 5,
-                                                 primary_new_offsets) != 0) {
+    } else if (build_relocated_positions_with_overrides(primary_original_offsets, primary_alignments,
+                                                        primary_reserved_sizes, primary_has_override,
+                                                        primary_override_offsets, 5,
+                                                        primary_new_offsets) != 0) {
         goto cleanup;
     }
     if (max_reserved_end(primary_new_offsets, primary_reserved_sizes, 5, &primary_end) != 0 ||
@@ -1969,11 +2182,41 @@ static int command_explicit_create(int argc, char **argv)
     if (automatic_size) {
         u32 logical_minimum = minimum_size;
         if (has_flashme) {
-            if (logical_minimum > UINT_MAX - FLASHME_TRAILER) {
-                print_error("FlashMe layout is too large for a firmware image");
+            if (flash_header_has_override) {
+                u32 explicit_header_end;
+                if (request.components[FWCOMP_FLASH_HEADER].offset > UINT_MAX - HEADER_BYTES) {
+                    print_error("FlashMe header offset exceeds the firmware address space");
+                    goto cleanup;
+                }
+                explicit_header_end = request.components[FWCOMP_FLASH_HEADER].offset + HEADER_BYTES;
+                if (logical_minimum < explicit_header_end) logical_minimum = explicit_header_end;
+                /* Unlike the standard FlashMe trailer, an explicitly placed
+                   secondary header does not imply an unused 0x980-byte tail.
+                   Reserve only the final user-settings sectors. */
+                if (logical_minimum > UINT_MAX - USER_SETTINGS_BYTES) {
+                    print_error("FlashMe layout is too large for a firmware image");
+                    goto cleanup;
+                }
+                logical_minimum += USER_SETTINGS_BYTES;
+            } else {
+                /* The standard secondary header lives 0x980 bytes before the
+                   end of the logical image.  Retain that legacy placement for
+                   automatic layouts. */
+                if (logical_minimum > UINT_MAX - FLASHME_TRAILER) {
+                    print_error("FlashMe layout is too large for a firmware image");
+                    goto cleanup;
+                }
+                logical_minimum += FLASHME_TRAILER;
+            }
+        } else {
+            /* Normal firmware keeps the four Wi-Fi sectors and two user
+               settings sectors at the end, whether or not -b supplies the
+               bytes to migrate. */
+            if (logical_minimum > UINT_MAX - SETTINGS_TAIL_BYTES) {
+                print_error("firmware layout is too large for its settings tail");
                 goto cleanup;
             }
-            logical_minimum += FLASHME_TRAILER;
+            logical_minimum += SETTINGS_TAIL_BYTES;
         }
         if (logical_minimum < CAPACITY_UNIT) logical_minimum = CAPACITY_UNIT;
         if (round_up_u32(logical_minimum, CAPACITY_UNIT, &logical_capacity) != 0) {
@@ -1989,18 +2232,34 @@ static int command_explicit_create(int argc, char **argv)
         print_error("firmware capacity must be 256 KiB or another 256 KiB multiple");
         goto cleanup;
     }
-    if (has_flashme) {
-        flash_header_offset = logical_capacity - FLASHME_TRAILER;
-        if (flash_end > flash_header_offset) {
-            print_error("FlashMe components overlap the secondary-header trailer area");
+    protected_tail_size = has_flashme ? USER_SETTINGS_BYTES : SETTINGS_TAIL_BYTES;
+    if (logical_capacity < protected_tail_size) {
+        print_error("firmware capacity is too small for its settings tail");
+        goto cleanup;
+    }
+    protected_tail_offset = logical_capacity - protected_tail_size;
+    if (request.base_path != NULL) {
+        u32 target_settings_tail_offset;
+        if (trailing_settings_location(logical_capacity, &target_settings_tail_offset,
+                                       &target_user_settings_offset) != 0 ||
+            set_header_user_settings_offset(&header, target_user_settings_offset) != 0 ||
+            (has_flashme && set_header_user_settings_offset(&flash_header,
+                                                            target_user_settings_offset) != 0)) {
             goto cleanup;
         }
+        base_copy_source_offset = base_settings_tail_offset;
+        base_copy_target_offset = target_settings_tail_offset;
+        base_copy_size = base_settings_tail_size;
+        base_copy_expected_size = SETTINGS_TAIL_BYTES;
+    }
+    if (has_flashme) {
+        flash_header_offset = flash_header_has_override ?
+            request.components[FWCOMP_FLASH_HEADER].offset : logical_capacity - FLASHME_TRAILER;
         if (flash_header_offset > output_size || HEADER_BYTES > output_size - flash_header_offset) {
             print_error("the output is too short to contain the FlashMe secondary header");
             goto cleanup;
         }
-        flash_trailer_size = output_size - flash_header_offset;
-        if (flash_trailer_size > FLASHME_TRAILER) flash_trailer_size = FLASHME_TRAILER;
+        flash_header_size = HEADER_BYTES;
     }
     if (primary_end > output_size || flash_end > output_size) {
         print_error("the selected output size is too small for these components");
@@ -2008,13 +2267,21 @@ static int command_explicit_create(int argc, char **argv)
     }
 
     if (add_firmware_range(ranges, &range_count, 0, HEADER_BYTES, output_size, "primary header") != 0) goto cleanup;
+    if (add_firmware_range(ranges, &range_count, protected_tail_offset, protected_tail_size,
+                           output_size, has_flashme ? "FlashMe user-settings tail" :
+                           "Wi-Fi and user-settings tail") != 0) {
+        goto cleanup;
+    }
+    if (has_flashme &&
+        add_firmware_range(ranges, &range_count, flash_header_offset, flash_header_size, output_size,
+                           "FlashMe secondary header") != 0) {
+        goto cleanup;
+    }
     for (i = 0; i < 5; i++) {
         if (add_firmware_range(ranges, &range_count, primary_new_offsets[i], primary_reserved_sizes[i],
                                output_size, primary_part_labels[i]) != 0) goto cleanup;
     }
     if (has_flashme) {
-        if (add_firmware_range(ranges, &range_count, flash_header_offset, flash_trailer_size, output_size,
-                               "FlashMe secondary-header trailer") != 0) goto cleanup;
         for (i = 0; i < 2; i++) {
             if (add_firmware_range(ranges, &range_count, flash_new_offsets[i], flash_reserved_sizes[i],
                                    output_size, flashme_part_names[i]) != 0) goto cleanup;
@@ -2041,6 +2308,14 @@ static int command_explicit_create(int argc, char **argv)
     if (blob_alloc(&output, output_size) != 0) goto cleanup;
     memset(output.data, request.fill_byte, output.size);
     memcpy(output.data, header.data, HEADER_BYTES);
+    /* A normal image reserves the whole copied 0x600 tail.  FlashMe v1--v4,
+       however, may put code in the preceding Wi-Fi area, so lay down the
+       copied base bytes first in that mode and let an explicitly placed
+       component deliberately replace only the bytes it owns. */
+    if (request.base_path != NULL && has_flashme) {
+        memcpy(output.data + base_copy_target_offset,
+               base.data + base_copy_source_offset, base_copy_size);
+    }
     for (i = 0; i < 5; i++) {
         memcpy(output.data + primary_new_offsets[i], primary_parts[i].data, primary_parts[i].size);
     }
@@ -2051,7 +2326,12 @@ static int command_explicit_create(int argc, char **argv)
         }
     }
     if (write_p345_alignment_padding(&output, primary_new_offsets, primary_parts,
-                                     flash_new_offsets, has_flashme, flash_header_offset) != 0) goto cleanup;
+                                     flash_new_offsets, has_flashme, flash_header_offset,
+                                     protected_tail_offset) != 0) goto cleanup;
+    if (request.base_path != NULL && !has_flashme) {
+        memcpy(output.data + base_copy_target_offset,
+               base.data + base_copy_source_offset, base_copy_size);
+    }
     if (write_file(output_path, output.data, output.size) != 0) goto cleanup;
 
     printf("Created %s (0x%08X bytes, fill=%02X)\n", output_path, output_size, request.fill_byte);
@@ -2066,11 +2346,22 @@ static int command_explicit_create(int argc, char **argv)
                    flash_new_offsets[i], (unsigned long)flash_parts[i].size, flash_reserved_sizes[i]);
         }
     }
+    if (request.base_path != NULL) {
+        printf("  Base settings: %s  source=0x%06X data=0x%03X target=0x%06X\n",
+               request.base_path, base_copy_source_offset, base_copy_size,
+               base_copy_target_offset);
+        if (base_copy_size != base_copy_expected_size) {
+            fprintf(stderr, "dsfwtool: warning: base firmware is missing final settings bytes; "
+                    "the remaining 0x%03X bytes use the output fill value\n",
+                    base_copy_expected_size - base_copy_size);
+        }
+    }
     result = 0;
 
 cleanup:
     blob_free(&header);
     blob_free(&flash_header);
+    blob_free(&base);
     blob_free(&output);
     for (i = 0; i < 5; i++) blob_free(&primary_parts[i]);
     for (i = 0; i < 2; i++) blob_free(&flash_parts[i]);

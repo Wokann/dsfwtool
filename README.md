@@ -63,11 +63,13 @@ encryption. P1 and P2 use an LZ10/P12 stream followed by the firmware
 encryption layer. P3, P4, and P5 use the P345 dual-static-Huffman format
 directly, with no encryption layer.
 
-FlashMe firmware has a second 0x180-byte header (`-fh`) in the trailer at
-logical capacity minus 0x980. Its FP1 and FP2 components are unencrypted P12
-streams. The seven components can be interleaved in physical ROM order, so
-the builder relocates them as one ordered set and writes their resulting
-starts back to the primary and FlashMe headers separately.
+By default, FlashMe firmware has a second 0x180-byte header (`-fh`) at logical
+capacity minus 0x980: `0x3F680` for 256 KiB and `0x7F680` for 512 KiB. Its FP1
+and FP2 components are unencrypted P12 streams. The seven components can be
+interleaved in physical ROM order, so the builder relocates them as one ordered
+set and writes their resulting starts back to the primary and FlashMe headers
+separately. A component-local `--offset` can pin any component, or the
+secondary header itself, to a chosen physical address.
 
 Some FlashMe dumps omit the final 0x200-byte settings sector and have a
 physical length ending in `0x...FE00`. Their logical capacity is still the
@@ -90,11 +92,13 @@ dsfwtool -x FIRMWARE.bin
   [-fh FLASH_HEADER.bin -fp1 [-uncomp] FILE -fp2 [-uncomp] FILE]
 
 dsfwtool -c OUTPUT.bin -h HEADER.bin
-  -p1 [-encrypt | -comp -encrypt] FILE
-  -p2 [-encrypt | -comp -encrypt] FILE
-  -p3 [-comp] FILE -p4 [-comp] FILE -p5 [-comp] FILE
-  [-fh FLASH_HEADER.bin -fp1 [-comp] FILE -fp2 [-comp] FILE]
-  [-s 256K|512K|1M|auto] [--fill 00|FF]
+  -p1 [-encrypt | -comp -encrypt] [--offset OFFSET] FILE
+  -p2 [-encrypt | -comp -encrypt] [--offset OFFSET] FILE
+  -p3 [-comp] [--offset OFFSET] FILE -p4 [-comp] [--offset OFFSET] FILE
+  -p5 [-comp] [--offset OFFSET] FILE
+  [-fh [--offset OFFSET] FLASH_HEADER.bin
+   -fp1 [-comp] [--offset OFFSET] FILE -fp2 [-comp] [--offset OFFSET] FILE]
+  [-b BASE.bin] [-s 256K|512K|1M|auto] [--fill 00|FF]
   [header-edit options]
 
 dsfwtool -p1|-p2|-p3|-p4|-p5|-fp1|-fp2
@@ -113,6 +117,35 @@ modifier are already encrypted P12 streams. `-encrypt` accepts an
 already-compressed, unencrypted P12 stream; `-comp -encrypt` accepts plaintext
 and performs both stages. P3/P4/P5 use only `-comp` for plaintext. `-crypt`
 is accepted as an alias of `-encrypt` for an independent P1/P2 operation.
+
+In `-c`, `--offset OFFSET` is a physical ROM byte address placed after that
+component's transformation modifiers and before its file name. P1/P2/P3/P4/P5
+and FP1/FP2 must satisfy the alignment encoded by their respective headers;
+`-fh` merely has to fit in the output. The final transformed size—after
+compression and/or encryption—is used for every collision check. The primary
+header reserves `0x000000`--`0x00017F`; normal firmware reserves its final
+`0x600` bytes for Wi-Fi and user settings. FlashMe reserves its secondary
+0x180-byte header and only the final `0x200` user-settings bytes, so its
+Wi-Fi-settings area remains available to older FlashMe layouts. The primary
+header's P1--P5 start fields and the FlashMe header's FP1/FP2 start fields are
+always regenerated from the chosen addresses. For ordinary FlashMe
+compatibility, use `-fh --offset 0x3F680` (256 KiB) or `0x7F680` (512 KiB), or
+omit the option to select the matching default.
+
+`-b BASE.bin` is available only with `-c`. It reads the base header's user
+settings pointer, copies the corresponding 0x600-byte trailing per-console
+area (Wi-Fi access-point settings plus the two user-settings sectors), and
+places it at the end of the new image. The primary header, and the FlashMe
+secondary header when present, are updated to point at the new final user
+settings sectors. In FlashMe mode the base tail is written before components:
+an explicitly placed component may therefore replace bytes in its preceding
+0x400-byte Wi-Fi area, while the final 0x200-byte user-settings sectors remain
+protected. `-s` remains available with `-b`, so a 256 KiB base can be rebuilt
+as 512 KiB (or vice versa) without losing available tail data. A base dump
+missing final settings sectors transfers the bytes it does contain and leaves
+unavailable output bytes at the selected fill value. The firmware's 16-bit,
+divide-by-eight user-settings pointer can address this trailing layout through
+512 KiB; `-b` therefore rejects a larger target size.
 
 `-p1` and `-p2` select P12. `-p3`, `-p4`, and `-p5` select P345. `-fp1` and
 `-fp2` select unencrypted P12. Encryption and decryption require `-h` and are
@@ -160,12 +193,21 @@ select the fill byte. Omitting `-s`, or using `-s auto`, selects the smallest
 select a capacity explicitly. Choose a larger explicit `-s` if recompressed
 FlashMe streams no longer fit their original layout.
 
+To preserve a console's trailing Wi-Fi and user settings while changing the
+capacity, add a base firmware:
+
+```text
+dsfwtool -c rebuilt-512.bin -b original.bin -s 512K -h unpack/header.bin \
+  -p1 unpack/p1.encrypted -p2 unpack/p2.encrypted \
+  -p3 unpack/p3.p345 -p4 unpack/p4.p345 -p5 unpack/p5.p345
+```
+
 Exported P3, P4, and P5 files contain only their effective P345 bitstreams.
 While assembling an image, packing writes `00` from each such stream through
 its next 8-byte boundary, without overwriting a following component or the
-FlashMe trailer header. This padding is not part of the component file and is
-not controlled by `--fill`. P1/P2 8-byte padding instead belongs to their
-encryption layer.
+FlashMe secondary header or protected settings tail. This padding is not part
+of the component file and is not controlled by `--fill`. P1/P2 8-byte padding
+instead belongs to their encryption layer.
 
 ### Export plaintext components
 

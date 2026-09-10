@@ -55,10 +55,11 @@ install -Dm755 release/dsfwtool "$HOME/.local/bin/dsfwtool"
 P1/P2 加密所需的参数。P1、P2 的内层是 LZ10/P12 流，外层再进行固件加密；
 P3、P4、P5 直接使用 P345 双静态 Huffman 格式，不带加密层。
 
-FlashMe 固件在“逻辑容量减 0x980”的尾部位置有第二个 0x180 字节头，通过 `-fh`
-表示。它的 FP1、FP2 是未加密的 P12 流。七个组件在物理 ROM 地址中可以交错
-排列，因此创建时会按统一的物理地址顺序重新安排它们，再把各自的新起始位置写回
-主头和 FlashMe 头。
+FlashMe 固件默认在“逻辑容量减 0x980”的位置放置第二个 0x180 字节头，通过 `-fh`
+表示：256 KiB 时为 `0x3F680`，512 KiB 时为 `0x7F680`。它的 FP1、FP2 是未加密的
+P12 流。七个组件在物理 ROM 地址中可以交错排列，因此创建时会按统一的物理地址顺序
+重新安排它们，再把各自的新起始位置写回主头和 FlashMe 头。每个组件及次级头本身都
+可通过局部的 `--offset` 固定到指定物理地址。
 
 部分 FlashMe 转储缺少最后的 0x200 字节设置扇区，物理文件长度会是
 `0x...FE00`；其逻辑容量仍是下一个 256 KiB 边界。创建时总是写出完整逻辑容量；
@@ -80,11 +81,13 @@ dsfwtool -x FIRMWARE.bin
   [-fh FLASH_HEADER.bin -fp1 [-uncomp] FILE -fp2 [-uncomp] FILE]
 
 dsfwtool -c OUTPUT.bin -h HEADER.bin
-  -p1 [-encrypt | -comp -encrypt] FILE
-  -p2 [-encrypt | -comp -encrypt] FILE
-  -p3 [-comp] FILE -p4 [-comp] FILE -p5 [-comp] FILE
-  [-fh FLASH_HEADER.bin -fp1 [-comp] FILE -fp2 [-comp] FILE]
-  [-s 256K|512K|1M|auto] [--fill 00|FF]
+  -p1 [-encrypt | -comp -encrypt] [--offset OFFSET] FILE
+  -p2 [-encrypt | -comp -encrypt] [--offset OFFSET] FILE
+  -p3 [-comp] [--offset OFFSET] FILE -p4 [-comp] [--offset OFFSET] FILE
+  -p5 [-comp] [--offset OFFSET] FILE
+  [-fh [--offset OFFSET] FLASH_HEADER.bin
+   -fp1 [-comp] [--offset OFFSET] FILE -fp2 [-comp] [--offset OFFSET] FILE]
+  [-b BASE.bin] [-s 256K|512K|1M|auto] [--fill 00|FF]
   [头部修改参数]
 
 dsfwtool -p1|-p2|-p3|-p4|-p5|-fp1|-fp2
@@ -101,6 +104,26 @@ dsfwtool -p1|-p2|-p3|-p4|-p5|-fp1|-fp2
 加密。P3/P4/P5 仅可用 `-comp` 输入明文。独立 P1/P2 操作中，`-crypt` 是
 `-encrypt` 的同义写法。
 
+在 `-c` 中，`--offset OFFSET` 表示物理 ROM 字节地址；它必须放在该组件的转换修饰词
+之后、文件名之前。P1/P2/P3/P4/P5 和 FP1/FP2 必须满足各自头中编码的起始对齐，`-fh`
+只需完整落在输出镜像内。所有碰撞判断均使用压缩和/或加密后的最终大小。主头保护
+`0x000000`--`0x00017F`；普通固件保护末尾 `0x600` 字节 Wi-Fi 与用户设置区；FlashMe
+保护其 0x180 字节次级头及仅末尾 `0x200` 字节用户设置区，因此旧版 FlashMe 可以占用
+前方 Wi-Fi 设置区域。工具始终依据指定后的物理地址重写主头中的 P1--P5 起始字段，
+以及 FlashMe 头中的 FP1/FP2 起始字段。为兼容通常的 FlashMe 布局，请使用
+`-fh --offset 0x3F680`（256 KiB）或 `0x7F680`（512 KiB），或省略该选项以自动选择
+对应默认位置。
+
+`-b BASE.bin` 仅能和 `-c` 一起使用。工具会依据基础固件头的用户设置指针，读取其
+对应的 0x600 字节主机专属尾区（Wi-Fi 接入点设置和两份用户设置），并迁移到新镜像
+的末尾。主头以及存在时的 FlashMe 次级头都会改为指向新的末尾用户设置区。在 FlashMe
+模式下，基础尾区会先于组件写入；因此显式放置的组件可以覆盖其前方 0x400 字节 Wi-Fi
+区域，而末尾 0x200 字节用户设置区始终受保护。`-b` 与 `-s` 可以同时使用，因此可在
+256 KiB 与 512 KiB 容量之间重建并保留可读取的尾区数据。若基础转储缺少最后的用户
+设置扇区，工具会迁移其实际存在的字节，缺失部分保持为所选填充值。固件头的用户设置
+指针是按 8 字节计的 16 位值，末尾迁移最多只能表示 512 KiB 容量，因此 `-b` 会拒绝
+更大的目标容量。
+
 `-p1`、`-p2` 选择 P12；`-p3`、`-p4`、`-p5` 选择 P345；`-fp1`、`-fp2` 选择
 未加密 P12。加密与解密仅适用于主 P1/P2，且需要 `-h`。独立 P1/P2 操作可以是
 单一步骤、`-decrypt -uncomp`，或 `-comp -crypt`；P345、FP1、FP2 则必须且只能
@@ -108,8 +131,9 @@ dsfwtool -p1|-p2|-p3|-p4|-p5|-fp1|-fp2
 
 P1/P2 解密只接受完整的 8 字节对齐密文，并在处理完所有分组后仅导出有效 P12
 流。P1/P2 加密可接受任意非空输入：已经 8 字节对齐的输入会原样进入加密；否则
-加密层只在内部为最后一个不完整分组补 `00`。因此，若需要保留已知的官方尾部字节，
-可将它们作为已对齐 P12 输入的一部分提供给 `-encrypt` 或 `-crypt`。
+加密层会先补零至 4 字节边界；若还需一个字才能达到 8 字节边界，则通过完整 ID 的
+KEY1 计算该尾字。已对齐输入中的显式尾字会保留。具体规则见
+[尾字派生说明](docs/compression-reconstruction.md#key1-派生尾字与加密块对齐)。
 
 ## 查看固件信息
 
@@ -169,9 +193,17 @@ dsfwtool -c rebuilt.bin -h unpack/header.bin \
 `-s 512K`、`-s 1M` 可显式选择容量。当重压缩后的 FlashMe 流无法装入原有布局时，
 应显式选择更大的 `-s`。
 
+需要在改变容量时保留主机末尾的 Wi-Fi 与用户设置，可加入基础固件：
+
+```text
+dsfwtool -c rebuilt-512.bin -b original.bin -s 512K -h unpack/header.bin \
+  -p1 unpack/p1.encrypted -p2 unpack/p2.encrypted \
+  -p3 unpack/p3.p345 -p4 unpack/p4.p345 -p5 unpack/p5.p345
+```
+
 P3、P4、P5 的导出文件只保存有效 P345 位流。组装镜像时，工具会从每个此类位流的
-有效末尾写入 `00`，直至下一个 8 字节边界；它不会覆盖后续组件或 FlashMe 尾部头。
-该填充不属于组件文件，也不受 `--fill` 影响。P1、P2 的 8 字节填充则属于加密层本身：
+有效末尾写入 `00`，直至下一个 8 字节边界；它不会覆盖后续组件、FlashMe 次级头或
+受保护的设置尾区。该填充不属于组件文件，也不受 `--fill` 影响。P1、P2 的 8 字节填充则属于加密层本身：
 先补零到 4 字节边界，若距离 8 字节对齐还差一个字，则由头部完整 ID 通过 KEY1
 计算该尾字，再将填充和有效流一起加密。已按 8 字节对齐的输入会保留其显式尾字。
 具体规则见[尾字派生说明](docs/compression-reconstruction.md#key1-派生尾字与加密块对齐)。
