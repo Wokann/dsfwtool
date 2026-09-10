@@ -405,6 +405,34 @@ static void sort_indices_by_offset(const u32 *offsets, int count, int *indices)
     }
 }
 
+/* A FlashMe patch derives both headers from an official header, whose ROM
+   locations describe the source image rather than the new combined layout.
+   Unless a component has an explicit --offset, use deterministic ordering
+   hints and let the relocation pass assign its final aligned location. */
+static int flashme_has_automatic_component_offsets(const int *has_override,
+                                                   int count)
+{
+    int i;
+    for (i = 0; i < count; i++) {
+        if (has_override == NULL || !has_override[i]) return 1;
+    }
+    return 0;
+}
+
+static void seed_automatic_layout_offsets(u32 *offsets, const int *has_override,
+                                          const int *physical_order, int count)
+{
+    int rank;
+    for (rank = 0; rank < count; rank++) {
+        int index = physical_order[rank];
+        if (has_override == NULL || !has_override[index]) {
+            /* These are ordering hints only.  The relocation pass below applies
+               each component's actual alignment and packed size. */
+            offsets[index] = HEADER_BYTES + (u32)rank;
+        }
+    }
+}
+
 static int calculate_spans(const u32 *offsets, int count, u32 image_limit, u32 *spans)
 {
     int indices[5];
@@ -575,7 +603,7 @@ static void add_flashme_candidate(u32 *candidates, int *count, u32 candidate, si
 
 static void detect_flashme_layout(const Blob *image, FirmwareLayout *layout)
 {
-    u32 candidates[3];
+    u32 candidates[5];
     int count = 0;
     int i;
 
@@ -585,6 +613,10 @@ static void detect_flashme_layout(const Blob *image, FirmwareLayout *layout)
     }
     add_flashme_candidate(candidates, &count, 0x3F680u, image->size);
     add_flashme_candidate(candidates, &count, 0x7F680u, image->size);
+    /* FlashMe v1--v4 place the secondary header after the Wi-Fi area,
+       at the end of the writable 0x3FE00-byte region. */
+    add_flashme_candidate(candidates, &count, 0x3FC80u, image->size);
+    add_flashme_candidate(candidates, &count, 0x7FC80u, image->size);
 
     for (i = 0; i < count; i++) {
         FirmwareLayout candidate = *layout;
@@ -836,6 +868,37 @@ static int apply_header_edits(Blob *header_blob, const HeaderEdits *edits)
     }
     if (edits->has_identifier) memcpy(((FW_HEADER *)header_blob->data)->fw_identifier, edits->identifier, 4);
     if (edits->has_timestamp) memcpy(((FW_HEADER *)header_blob->data)->fw_timestamp, edits->timestamp, 5);
+    return 0;
+}
+
+/* Offline FlashMe repair pass.  Component patches construct H and FH from the
+   same original header.  Once P1--P5 have been placed, H owns every common
+   field: identifiers, configuration data, component descriptors and CRCs, and
+   the original-firmware marker at 0x17E.  FH retains only its FP1/FP2
+   descriptor at 0x0C--0x13 and its independent FlashMe type at 0x17C.  This
+   matches the official V1--V8 templates, which carry the same CRC fields in H
+   and FH.  A correct H can therefore repair a stale FH without erasing the
+   latter's boot targets. */
+static int sync_flashme_header_from_primary(Blob *primary_blob, Blob *flash_blob)
+{
+    const u32 p12_descriptor_offset = (u32)offsetof(FW_HEADER, part1_romaddr);
+    const u32 p12_descriptor_size = (u32)offsetof(FW_HEADER, shift_amounts) -
+                                    p12_descriptor_offset;
+    const u32 type_offset = 0x17Cu;
+    u8 secondary_p12_descriptor[8];
+    u8 secondary_type[2];
+    if (primary_blob->size < HEADER_BYTES || flash_blob->size < HEADER_BYTES) {
+        print_error("FlashMe header is smaller than 0x%X bytes", HEADER_BYTES);
+        return -1;
+    }
+
+    memcpy(secondary_p12_descriptor, flash_blob->data + p12_descriptor_offset,
+           p12_descriptor_size);
+    memcpy(secondary_type, flash_blob->data + type_offset, sizeof(secondary_type));
+    memcpy(flash_blob->data, primary_blob->data, HEADER_BYTES);
+    memcpy(flash_blob->data + p12_descriptor_offset, secondary_p12_descriptor,
+           p12_descriptor_size);
+    memcpy(flash_blob->data + type_offset, secondary_type, sizeof(secondary_type));
     return 0;
 }
 
@@ -1282,6 +1345,7 @@ static int build_flashme_combined_positions(const u32 primary_original_offsets[5
     u32 override_offsets[MAX_RELOCATED_COMPONENTS];
     int has_override[MAX_RELOCATED_COMPONENTS];
     u32 new_offsets[MAX_RELOCATED_COMPONENTS];
+    static const int physical_order[MAX_RELOCATED_COMPONENTS] = {0, 1, 4, 3, 2, 5, 6};
     int i;
 
     for (i = 0; i < 5; i++) {
@@ -1297,6 +1361,12 @@ static int build_flashme_combined_positions(const u32 primary_original_offsets[5
         sizes[5 + i] = flash_sizes[i];
         has_override[5 + i] = flash_has_override[i];
         override_offsets[5 + i] = flash_override_offsets[i];
+    }
+    if (flashme_has_automatic_component_offsets(has_override,
+                                                MAX_RELOCATED_COMPONENTS)) {
+        seed_automatic_layout_offsets(original_offsets, has_override, physical_order,
+                                      MAX_RELOCATED_COMPONENTS);
+        printf("Using automatic FlashMe component layout for components without --offset.\n");
     }
     if (build_relocated_positions_with_overrides(original_offsets, alignments, sizes,
                                                  has_override, override_offsets,
@@ -2147,7 +2217,7 @@ static int command_explicit_create(int argc, char **argv)
     if (has_flashme) {
         flash_header_has_override = request.components[FWCOMP_FLASH_HEADER].has_offset;
         if (read_header_file(request.components[FWCOMP_FLASH_HEADER].path, &flash_header) != 0 ||
-            apply_header_edits(&flash_header, &request.edits) != 0) goto cleanup;
+            sync_flashme_header_from_primary(&header, &flash_header) != 0) goto cleanup;
         secondary_header = (FW_HEADER *)flash_header.data;
         for (i = 0; i < 2; i++) {
             int component = FWCOMP_FLASH_P1 + i;
@@ -2289,17 +2359,13 @@ static int command_explicit_create(int argc, char **argv)
     }
 
     if (set_primary_component_offsets(primary_header, primary_new_offsets) != 0 ||
-        update_header_config_checksum(&header) != 0) goto cleanup;
-    if (!has_flashme) {
-        if (calculate_primary_crcs(primary_header, primary_parts, &primary_header->part12_crc16,
-                                   &primary_header->part34_crc16, &primary_header->part5_crc16) != 0) goto cleanup;
-    } else {
-        /* FlashMe patches the boot code but deliberately retains the retail
-           version CRC16 values in both headers.  They are used by FlashMe's
-           version/update logic, so preserving the supplied header fields is
-           the lossless default; changing them to CRCs of patched code makes
-           an otherwise byte-identical repack differ at header offsets 0x04
-           and 0x06. */
+        update_header_config_checksum(&header) != 0 ||
+        calculate_primary_crcs(primary_header, primary_parts, &primary_header->part12_crc16,
+                               &primary_header->part34_crc16, &primary_header->part5_crc16) != 0) {
+        goto cleanup;
+    }
+    if (has_flashme) {
+        if (sync_flashme_header_from_primary(&header, &flash_header) != 0) goto cleanup;
         secondary_header = (FW_HEADER *)flash_header.data;
         if (set_flashme_component_offsets(secondary_header, flash_new_offsets) != 0 ||
             update_header_config_checksum(&flash_header) != 0) goto cleanup;

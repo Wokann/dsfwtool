@@ -68,8 +68,10 @@ capacity minus 0x980: `0x3F680` for 256 KiB and `0x7F680` for 512 KiB. Its FP1
 and FP2 components are unencrypted P12 streams. The seven components can be
 interleaved in physical ROM order, so the builder relocates them as one ordered
 set and writes their resulting starts back to the primary and FlashMe headers
-separately. A component-local `--offset` can pin any component, or the
-secondary header itself, to a chosen physical address.
+separately. When a component has no `--offset`, a deterministic FlashMe order
+is used and the transformed size and header alignment determine its address.
+A component-local `--offset` can pin any component, or the secondary header
+itself, to a chosen physical address.
 
 Some FlashMe dumps omit the final 0x200-byte settings sector and have a
 physical length ending in `0x...FE00`. Their logical capacity is still the
@@ -130,7 +132,9 @@ Wi-Fi-settings area remains available to older FlashMe layouts. The primary
 header's P1--P5 start fields and the FlashMe header's FP1/FP2 start fields are
 always regenerated from the chosen addresses. For ordinary FlashMe
 compatibility, use `-fh --offset 0x3F680` (256 KiB) or `0x7F680` (512 KiB), or
-omit the option to select the matching default.
+omit the option to select the matching default. Components without an explicit
+offset are automatically relocated together; mixed automatic and explicit
+component placement is supported and checked as one layout.
 
 `-b BASE.bin` is available only with `-c`. It reads the base header's user
 settings pointer, copies the corresponding 0x600-byte trailing per-console
@@ -276,7 +280,12 @@ previous stream.
 ## Header edits during creation
 
 The following options modify the supplied primary header before P1/P2
-encryption. For FlashMe creation, the same edits are also applied to `-fh`.
+encryption. During FlashMe creation, the final primary header repairs all
+common FH fields. The FP1/FP2 source and RAM descriptors (`0x0C`--`0x13`) and
+the FH type marker (`0x17C`) remain those supplied by `-fh`; its final FP1/FP2
+source offsets are then regenerated from the selected layout. The final CRC
+fields and original-firmware marker are copied from H, matching official
+FlashMe V1--V8 templates.
 
 ```text
 --identifier ABCD
@@ -296,8 +305,9 @@ encryption. For FlashMe creation, the same edits are also applied to `-fh`.
 relative to the exported 0x180-byte header. The tool writes component ROM
 starts from the final layout and recalculates the declared Wi-Fi configuration
 checksum. For a normal firmware it also derives the three primary component
-CRC16 values. FlashMe creation preserves the component CRC16 fields supplied
-by its primary and secondary headers.
+CRC16 values. FlashMe creation recalculates H's P1--P5 values, then copies all
+final common CRC fields into FH while retaining FH's own FP1/FP2 descriptors
+and type marker, matching official FlashMe V1--V8 layout.
 
 For detailed P12 and P345 bitstream structures and encoding rules, see
 [Compression Structures and Encoding Rules](docs/compression-reconstruction.md).
