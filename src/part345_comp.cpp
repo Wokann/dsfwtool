@@ -66,6 +66,48 @@ static PNODE build_tree_from_freq_table(u32 *freq, u32 items) {
     return count ? heap[1] : NULL;
 }
 
+/* FlashMe P345 tree construction, reconstructed by CTurt's CFW-Suite:
+ * https://github.com/CTurt/CFW-Suite/blob/f2f2ca1e6a31e7c32edd02682a539a224ec015b7/guiTool/source/compression.c
+ *
+ * This intentionally is not a heap.  It scans active leaves and previously
+ * created parents in array order for every merge.  Strict comparisons leave
+ * equal-weight choices in their earlier order, which is required to reproduce
+ * FlashMe's serialized Huffman trees byte for byte. */
+static PNODE build_flashme_tree_from_freq_table(u32 *freq, u32 items) {
+	PNODE nodes[0x1800];
+	PNODE tree, node1, node2, node;
+	u32 i, index;
+
+	memset(nodes, 0, sizeof(nodes));
+	for(i = 0; i < items; i++) {
+		if(freq[i] != 0) nodes[i] = node_create(NULL, NULL, i, freq[i]);
+	}
+
+	index = items;
+	for(;;) {
+		node1 = NULL;
+		node2 = NULL;
+		for(i = 0; i < index; i++) {
+			node = nodes[i];
+			if(node == NULL || node->weight == 0) continue;
+			if(node1 == NULL) node1 = node;
+			else if(node2 == NULL) node2 = node;
+			else if(node->weight < node1->weight || node->weight < node2->weight) {
+				if(node1->weight > node2->weight) node1 = node;
+				else node2 = node;
+			}
+		}
+		if(node1 == NULL || node2 == NULL) {
+			tree = node1 != NULL ? node1 : node2;
+			break;
+		}
+		nodes[index++] = node_create(node1, node2, 0, node1->weight + node2->weight);
+		node1->weight = 0;
+		node2->weight = 0;
+	}
+	return tree;
+}
+
 static void tree_get_depth_and_path_for_value( PNODE node, u32 value, u32 depth, u32 path, int *depthx, int *pathx) {
 	if(node) {
 		if((node->left) || (node->right)) {
@@ -258,6 +300,38 @@ static void lz_search(u8 *src, u32 pos, u32 srcmax, u32 *back, u32 *length) {
 	}
 }
 
+/* FlashMe P345 LZ selection reconstructed by CTurt's CFW-Suite.  The source
+ * implementation measures the full remaining match before truncating the
+ * emitted token to 0x102 bytes, performs no lazy look-ahead, and retains the
+ * first (nearest) distance when full match lengths tie.  The bounded loop here
+ * has the same selected length without CFW-Suite's final speculative read. */
+static u32 lz_memcmp_flashme(u8 *mem1, u8 *mem2, u32 max) {
+	u32 ret = 0;
+	while(max != 0 && *mem1 == *mem2) {
+		mem1++;
+		mem2++;
+		max--;
+		ret++;
+	}
+	return ret;
+}
+
+static void lz_search_flashme(u8 *src, u32 pos, u32 srcmax, u32 *back, u32 *length) {
+	u32 i, len;
+
+	*back = 0;
+	*length = 0;
+	for(i = 0; i < 0x800; i++) {
+		if(i < pos) {
+			len = lz_memcmp_flashme(src + pos, src + pos - i - 1, srcmax - pos);
+			if(len > 2 && len > *length) {
+				*length = len;
+				*back = i + 1;
+			}
+		}
+	}
+}
+
 static void lz_search_lazy(u8 *src, u32 pos, u32 srcmax, u32 *back, u32 *length, bool *commit_match) {
 	u32 next_back, next_length;
 	lz_search(src, pos, srcmax, back, length);
@@ -318,14 +392,40 @@ static void bitstream_pad_to_word(BITSTREAM *stream) {
 	while((stream->pos % 4) != 0) bitstream_write(stream, 8, 0);
 }
 
+static u32 finish_part345_streams(u8 *dst, BITSTREAM *primary, BITSTREAM *distance, u32 size) {
+	u32 effective_size;
+	u32 stored_size;
+	BITSTREAM header;
+
+	/* The primary stream's word alignment is encoded as the distance stream's
+	   start.  The final stream keeps only its last consumed byte; image padding
+	   is written later by dsfwtool's firmware packer. */
+	bitstream_pad_to_word(primary);
+	bitstream_finish_byte(distance);
+	effective_size = 12 + primary->pos + distance->pos;
+	stored_size = 12 + primary->pos + ((distance->pos + 3u) & ~3u);
+
+	memset(dst, 0, effective_size);
+	bitstream_clear(&header);
+	header.ptr = dst;
+	bitstream_write(&header, 8 * 3, swap32(stored_size * 4) >> 8);
+	bitstream_write(&header, 8 * 1, 0x80);
+	bitstream_write(&header, 8 * 1, 0x80);
+	bitstream_write(&header, 8 * 3, size);
+	bitstream_write(&header, 8 * 4, 12 + primary->pos);
+	memcpy(dst + 12, primary->ptr, primary->pos);
+	memcpy(dst + 12 + primary->pos, distance->ptr, distance->pos);
+	return effective_size;
+}
+
 u32 compress_part345(u8 *dst, u8 *src, u32 size) {
 	u32 i, back, length;
 	bool commit_match;
 	u32 *freq[2];
 	PNODE tree[2];
 	PDPV_TABLE dpv[2];
-	BITSTREAM bs[2], bsdst;
-	u32 bitlen[2], effective_size, stored_size, stream_capacity;
+	BITSTREAM bs[2];
+	u32 bitlen[2], stream_capacity, compressed_size;
 
 	if(dst == NULL || src == NULL || size == 0 || size > 0xFFFFFFu) return 0;
 	stream_capacity = size * 2u + 0x10000u;
@@ -397,26 +497,7 @@ u32 compress_part345(u8 *dst, u8 *src, u32 size) {
 		}
 	}
 	
-	/* The first stream ends at a format-defined word boundary.  For the second
-	   stream, retain only its final partially occupied byte.  `stored_size`
-	   remains word-aligned in the on-stream header so a firmware image writer
-	   can materialize the required trailing zeroes separately. */
-	bitstream_pad_to_word(&bs[0]);
-	bitstream_finish_byte(&bs[1]);
-	effective_size = 12 + bs[0].pos + bs[1].pos;
-	stored_size = 12 + bs[0].pos + ((bs[1].pos + 3u) & ~3u);
-	
-	// combine data
-	memset(dst, 0, effective_size);
-	bitstream_clear(&bsdst);
-	bsdst.ptr = dst;
-	bitstream_write(&bsdst, 8 * 3, swap32(stored_size * 4) >> 8);
-	bitstream_write(&bsdst, 8 * 1, 0x80);
-	bitstream_write(&bsdst, 8 * 1, 0x80);
-	bitstream_write(&bsdst, 8 * 3, size);
-	bitstream_write(&bsdst, 8 * 4, 12 + bs[0].pos);
-	memcpy(dst + 12, bs[0].ptr, bs[0].pos);
-	memcpy(dst + 12 + bs[0].pos, bs[1].ptr, bs[1].pos);
+	compressed_size = finish_part345_streams(dst, &bs[0], &bs[1], size);
 	// free depth-to-value table
 	for(i = 0; i < 2; i++) free(dpv[i]);
 	// free freq table
@@ -424,7 +505,100 @@ u32 compress_part345(u8 *dst, u8 *src, u32 size) {
 	// free bitstream data
 	for(i = 0; i < 2; i++) free(bs[i].ptr);
 	
-	return effective_size;
+	return compressed_size;
+}
+
+/* FlashMe P345 compression algorithm reconstructed by CTurt's CFW-Suite.
+ *
+ * Reference implementation:
+ * https://github.com/CTurt/CFW-Suite/blob/f2f2ca1e6a31e7c32edd02682a539a224ec015b7/guiTool/source/compression.c
+ *
+ * The LZ search and Huffman merge order are intentionally kept distinct from
+ * compress_part345(), which reproduces retail firmware.  CFW-Suite wrote the
+ * final distance stream through a four-byte boundary; this integration returns
+ * only the effective stream, and dsfwtool supplies physical alignment zeroes
+ * when it writes a firmware image. */
+u32 compress_part345_flashme(u8 *dst, u8 *src, u32 size) {
+	u32 i, back, length;
+	u32 *freq[2] = { NULL, NULL };
+	PNODE tree[2] = { NULL, NULL };
+	PDPV_TABLE dpv[2] = { NULL, NULL };
+	BITSTREAM bs[2];
+	u32 bitlen[2] = { 9, 11 };
+	u32 stream_capacity;
+	u32 compressed_size = 0;
+
+	if(dst == NULL || src == NULL || size == 0 || size > 0xFFFFFFu) return 0;
+	stream_capacity = size * 2u + 0x10000u;
+
+	for(i = 0; i < 2; i++) bitstream_clear(&bs[i]);
+	for(i = 0; i < 2; i++) {
+		bs[i].ptr = (u8 *)malloc(stream_capacity);
+		if(bs[i].ptr == NULL) goto cleanup;
+		freq[i] = (u32 *)malloc((1u << bitlen[i]) * sizeof(*freq[i]));
+		if(freq[i] == NULL) goto cleanup;
+		memset(freq[i], 0, (1u << bitlen[i]) * sizeof(*freq[i]));
+		dpv[i] = (PDPV_TABLE)malloc((1u << bitlen[i]) * sizeof(*dpv[i]));
+		if(dpv[i] == NULL) goto cleanup;
+	}
+
+	/* First pass: CTurt's non-lazy, full-length match selection. */
+	i = 0;
+	while(i < size) {
+		lz_search_flashme(src, i, size, &back, &length);
+		if(back != 0) {
+			if(length > 0x102) length = 0x102;
+			freq[1][back - 1]++;
+			freq[0][length - 3 + 0x100]++;
+			i += length;
+		}
+		else {
+			freq[0][src[i]]++;
+			i++;
+		}
+	}
+
+	/* Retail FlashMe data always has branching trees.  Keep an additional leaf
+	 * only for degenerate user input so the standalone tool still emits a valid
+	 * decodable P345 stream.  This does not change any reconstructed FlashMe
+	 * component. */
+	for(i = 0; i < 2; i++) ensure_decodable_tree(freq[i], 1u << bitlen[i]);
+	for(i = 0; i < 2; i++) {
+		tree[i] = build_flashme_tree_from_freq_table(freq[i], 1u << bitlen[i]);
+		if(tree[i] == NULL) goto cleanup;
+		tree_to_dpv(tree[i], dpv[i], 1u << bitlen[i], false);
+		vpk_tree_save(tree[i], &bs[i], bitlen[i]);
+		free_tree(tree[i]);
+		tree[i] = NULL;
+	}
+
+	/* Second pass repeats exactly the same selection and writes the codes. */
+	i = 0;
+	while(i < size) {
+		lz_search_flashme(src, i, size, &back, &length);
+		if(back != 0) {
+			if(length > 0x102) length = 0x102;
+			bitstream_write(&bs[1], dpv[1][back - 1].depth, dpv[1][back - 1].path);
+			bitstream_write(&bs[0], dpv[0][length - 3 + 0x100].depth,
+			                dpv[0][length - 3 + 0x100].path);
+			i += length;
+		}
+		else {
+			bitstream_write(&bs[0], dpv[0][src[i]].depth, dpv[0][src[i]].path);
+			i++;
+		}
+	}
+
+	compressed_size = finish_part345_streams(dst, &bs[0], &bs[1], size);
+
+cleanup:
+	for(i = 0; i < 2; i++) {
+		free_tree(tree[i]);
+		free(dpv[i]);
+		free(freq[i]);
+		free(bs[i].ptr);
+	}
+	return compressed_size;
 }
 
 u32 getCompressedPart345Size(u8 *src) {

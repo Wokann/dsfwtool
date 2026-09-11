@@ -96,8 +96,9 @@ dsfwtool -x FIRMWARE.bin
 dsfwtool -c OUTPUT.bin -h HEADER.bin
   -p1 [-encrypt | -comp -encrypt] [--offset OFFSET] FILE
   -p2 [-encrypt | -comp -encrypt] [--offset OFFSET] FILE
-  -p3 [-comp] [--offset OFFSET] FILE -p4 [-comp] [--offset OFFSET] FILE
-  -p5 [-comp] [--offset OFFSET] FILE
+  -p3 [-comp [-flashme]] [--offset OFFSET] FILE
+  -p4 [-comp [-flashme]] [--offset OFFSET] FILE
+  -p5 [-comp [-flashme]] [--offset OFFSET] FILE
   [-fh [--offset OFFSET] FLASH_HEADER.bin
    -fp1 [-comp] [--offset OFFSET] FILE -fp2 [-comp] [--offset OFFSET] FILE]
   [-b BASE.bin] [-s 256K|512K|1M|auto] [--fill 00|FF]
@@ -117,8 +118,11 @@ provides the key material.
 is supplied, `-fh`, `-fp1`, and `-fp2` must all be supplied. P1/P2 with no
 modifier are already encrypted P12 streams. `-encrypt` accepts an
 already-compressed, unencrypted P12 stream; `-comp -encrypt` accepts plaintext
-and performs both stages. P3/P4/P5 use only `-comp` for plaintext. `-crypt`
-is accepted as an alias of `-encrypt` for an independent P1/P2 operation.
+and performs both stages. P3/P4/P5 use `-comp` for plaintext: by default it
+uses the retail P345 encoder, while `-comp -flashme` selects the FlashMe P345
+rule reconstructed by CTurt's CFW-Suite. `-flashme` is accepted only directly
+after `-comp` for P3/P4/P5; it is not a P12 option. `-crypt` is accepted as an
+alias of `-encrypt` for an independent P1/P2 operation.
 
 In `-c`, `--offset OFFSET` is a physical ROM byte address placed after that
 component's transformation modifiers and before its file name. P1/P2/P3/P4/P5
@@ -155,7 +159,8 @@ divide-by-eight user-settings pointer can address this trailing layout through
 `-fp2` select unencrypted P12. Encryption and decryption require `-h` and are
 valid only for primary P1/P2. An independent P1/P2 operation may be a single
 stage, `-decrypt -uncomp`, or `-comp -crypt`; P345 and FP1/FP2 require exactly
-one of `-comp` or `-uncomp`.
+one of `-comp` or `-uncomp`. Only primary P3/P4/P5 accept `-flashme`, and only
+as the immediate suffix of `-comp`.
 
 P1/P2 decryption accepts only complete, 8-byte-aligned ciphertext and exports
 only the effective P12 stream after processing its blocks. P1/P2 encryption
@@ -241,7 +246,14 @@ dsfwtool -p1 -comp -crypt work/p1.plain -h header.bin -o output/p1.encrypted
 
 dsfwtool -p3 -uncomp p3.p345 -o work/p3.plain
 dsfwtool -p3 -comp work/p3.plain -o output/p3.p345
+dsfwtool -p3 -comp -flashme work/p3.plain -o output/p3.flashme.p345
 ```
+
+The last command uses the FlashMe P345 encoder reconstructed by
+[CTurt's CFW-Suite](https://github.com/CTurt/CFW-Suite/blob/f2f2ca1e6a31e7c32edd02682a539a224ec015b7/guiTool/source/compression.c).
+It is intentionally separate from the default retail encoder because the two
+encoders make different LZ and Huffman tie-breaking choices despite sharing the
+same P345 decompression format.
 
 The combined P1/P2 forms avoid a named intermediate file:
 
@@ -267,15 +279,16 @@ dsfwtool -c rebuilt.bin -s 512K -h unpack/header.bin \
 dsfwtool -c flashme-rebuilt.bin -s 512K \
   -h unpack/header.bin \
   -p1 unpack/p1.encrypted -p2 unpack/p2.encrypted \
-  -p3 unpack/p3.p345 -p4 unpack/p4.p345 -p5 unpack/p5.p345 \
+  -p3 -comp -flashme unpack/p3.plain \
+  -p4 -comp -flashme unpack/p4.plain \
+  -p5 -comp -flashme unpack/p5.plain \
   -fh unpack/flash-header.bin \
   -fp1 -comp unpack/fp1.plain -fp2 -comp unpack/fp2.plain
 ```
 
 For FP1/FP2, no modifier accepts an existing unencrypted P12 stream and
-`-comp` accepts plaintext. FlashMe compatibility is determined by the
-decompressed data and resulting layout; its compressed bytes need not match a
-previous stream.
+`-comp` accepts plaintext. `-flashme` affects only the primary P3/P4/P5
+compression route; it does not apply to P1/P2 or FP1/FP2.
 
 ## Header edits during creation
 

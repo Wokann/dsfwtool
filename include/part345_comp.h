@@ -12,6 +12,10 @@ u32 decompress_part345(u8 *dst, u8 *src);
 /* Returns the effective byte count: the encoder does not include image
    alignment zeroes after the final P345 bitstream. */
 u32 compress_part345(u8 *dst, u8 *src, u32 size);
+/* FlashMe P345 encoding rule reconstructed by CTurt's CFW-Suite.  This is an
+   alternative to the retail encoder above and likewise returns an effective
+   stream without final image-alignment zeroes. */
+u32 compress_part345_flashme(u8 *dst, u8 *src, u32 size);
 u32 getCompressedPart345Size(u8 *src);
 
 #ifdef __cplusplus

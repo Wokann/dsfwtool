@@ -84,8 +84,9 @@ dsfwtool -x FIRMWARE.bin
 dsfwtool -c OUTPUT.bin -h HEADER.bin
   -p1 [-encrypt | -comp -encrypt] [--offset OFFSET] FILE
   -p2 [-encrypt | -comp -encrypt] [--offset OFFSET] FILE
-  -p3 [-comp] [--offset OFFSET] FILE -p4 [-comp] [--offset OFFSET] FILE
-  -p5 [-comp] [--offset OFFSET] FILE
+  -p3 [-comp [-flashme]] [--offset OFFSET] FILE
+  -p4 [-comp [-flashme]] [--offset OFFSET] FILE
+  -p5 [-comp [-flashme]] [--offset OFFSET] FILE
   [-fh [--offset OFFSET] FLASH_HEADER.bin
    -fp1 [-comp] [--offset OFFSET] FILE -fp2 [-comp] [--offset OFFSET] FILE]
   [-b BASE.bin] [-s 256K|512K|1M|auto] [--fill 00|FF]
@@ -102,8 +103,10 @@ dsfwtool -p1|-p2|-p3|-p4|-p5|-fp1|-fp2
 `-c` 始终需要 `-h` 与全部 P1 至 P5。只要指定任何 FlashMe 文件，就必须同时
 指定 `-fh`、`-fp1`、`-fp2`。P1/P2 不带修饰词时输入的是已加密 P12 流；
 `-encrypt` 输入已压缩但未加密的 P12 流；`-comp -encrypt` 输入明文并连续压缩、
-加密。P3/P4/P5 仅可用 `-comp` 输入明文。独立 P1/P2 操作中，`-crypt` 是
-`-encrypt` 的同义写法。
+加密。P3/P4/P5 用 `-comp` 输入明文：默认采用官方固件的 P345 编码器；
+`-comp -flashme` 则选择由 CTurt 的 CFW-Suite 复现的 FlashMe P345 规则。
+`-flashme` 只能紧跟在 P3/P4/P5 的 `-comp` 后，P12 不存在该参数。
+独立 P1/P2 操作中，`-crypt` 是 `-encrypt` 的同义写法。
 
 在 `-c` 中，`--offset OFFSET` 表示物理 ROM 字节地址；它必须放在该组件的转换修饰词
 之后、文件名之前。P1/P2/P3/P4/P5 和 FP1/FP2 必须满足各自头中编码的起始对齐，`-fh`
@@ -129,7 +132,8 @@ dsfwtool -p1|-p2|-p3|-p4|-p5|-fp1|-fp2
 `-p1`、`-p2` 选择 P12；`-p3`、`-p4`、`-p5` 选择 P345；`-fp1`、`-fp2` 选择
 未加密 P12。加密与解密仅适用于主 P1/P2，且需要 `-h`。独立 P1/P2 操作可以是
 单一步骤、`-decrypt -uncomp`，或 `-comp -crypt`；P345、FP1、FP2 则必须且只能
-选择 `-comp` 或 `-uncomp` 之一。
+选择 `-comp` 或 `-uncomp` 之一。仅主 P3/P4/P5 支持 `-flashme`，且只能作为
+`-comp` 的紧随修饰词。
 
 P1/P2 解密只接受完整的 8 字节对齐密文，并在处理完所有分组后仅导出有效 P12
 流。P1/P2 加密可接受任意非空输入：已经 8 字节对齐的输入会原样进入加密；否则
@@ -234,14 +238,15 @@ dsfwtool -c rebuilt.bin -s 512K -h unpack/header.bin \
 dsfwtool -c flashme-rebuilt.bin -s 512K \
   -h unpack/header.bin \
   -p1 unpack/p1.encrypted -p2 unpack/p2.encrypted \
-  -p3 unpack/p3.p345 -p4 unpack/p4.p345 -p5 unpack/p5.p345 \
+  -p3 -comp -flashme unpack/p3.plain \
+  -p4 -comp -flashme unpack/p4.plain \
+  -p5 -comp -flashme unpack/p5.plain \
   -fh unpack/flash-header.bin \
   -fp1 -comp unpack/fp1.plain -fp2 -comp unpack/fp2.plain
 ```
 
 FP1/FP2 不带修饰词时输入的是已有未加密 P12 流，带 `-comp` 时输入明文。
-FlashMe 的兼容性以解压后的数据和最终布局为准，不要求压缩字节与已有流逐字节
-一致。
+`-flashme` 只影响主 P3/P4/P5 的压缩路径，不适用于 P1/P2、FP1 或 FP2。
 
 ## 单独处理压缩或加密流
 
@@ -255,12 +260,16 @@ dsfwtool -p1 -comp p1.plain -o output/p1.p12
 dsfwtool -p1 -comp -crypt p1.plain -h header.bin -o output/p1.encrypted
 dsfwtool -p3 -uncomp p3.p345 -o output/p3.plain
 dsfwtool -p3 -comp p3.plain -o output/p3.p345
+dsfwtool -p3 -comp -flashme p3.plain -o output/p3.flashme.p345
 dsfwtool -fp1 -uncomp fp1.p12 -o output/fp1.plain
 dsfwtool -fp1 -comp fp1.plain -o output/fp1.p12
 ```
 
 `-p3`、`-p4`、`-p5` 自动选择 P345；`-fp1`、`-fp2` 自动选择未加密 P12。
-P345 与 FlashMe 流会拒绝加密参数。
+其中最后一条 P3 命令采用由
+[CTurt 的 CFW-Suite](https://github.com/CTurt/CFW-Suite/blob/f2f2ca1e6a31e7c32edd02682a539a224ec015b7/guiTool/source/compression.c)
+复现的 FlashMe P345 编码器。它与默认官方编码器共用 P345 解压格式，但 LZ 与
+Huffman 的并列选择规则不同，因此需要显式指定。P345 与 FlashMe 流会拒绝加密参数。
 
 ## 创建时修改头部
 

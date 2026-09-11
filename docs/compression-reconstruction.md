@@ -331,6 +331,30 @@ streams; alignment determines their offsets and header values. Matching only
 decompressed data or total encoded length leaves these byte-level decisions
 undetermined.
 
+### FlashMe P345 variant (`-comp -flashme`)
+
+FlashMe P3/P4/P5 streams use the same decompression format, but their encoder
+does not make the retail encoder's LZ and Huffman choices. The alternate rule
+was reconstructed by CTurt's CFW-Suite; its reference implementation is
+[`compression.c`](https://github.com/CTurt/CFW-Suite/blob/f2f2ca1e6a31e7c32edd02682a539a224ec015b7/guiTool/source/compression.c).
+`dsfwtool -p3|-p4|-p5 -comp -flashme` selects that rule explicitly.
+
+- Search distances from nearest to farthest in the same 2048-byte window, make
+  no lazy look-ahead decision, and keep the nearest candidate on an equal full
+  match length.
+- Compare the full remaining input when choosing a candidate, then cap only the
+  emitted match token at 258 bytes.
+- Build each Huffman tree by repeatedly scanning the active leaf/parent array
+  in its existing order. Strict comparisons preserve the earlier order for
+  equal weights; the two selected nodes become the left and right children.
+- Word-align the primary stream for the declared distance offset, but retain
+  only the final consumed byte of the distance stream. The firmware packer
+  supplies physical zero alignment after the effective component end.
+
+This mode applies only to primary P3/P4/P5 compression. P1/P2 continue to use
+the separately reconstructed retail P12 compressor and do not recognise
+`-flashme`.
+
 ---
 
 # DS 固件压缩结构与编码规则
@@ -623,3 +647,21 @@ effective_end = distance_offset + ceil(B1 / 8)
 完整的字节确定过程是：LZ 选择决定符号及频率，确定性的堆操作决定树形和
 码字路径，前序树序列化与高位优先的位打包决定两条流，对齐决定偏移与头部值。
 仅确定解压内容或总编码长度，还不足以确定这些逐字节的编码选择。
+
+### FlashMe P345 变体（`-comp -flashme`）
+
+FlashMe 的 P3/P4/P5 与官方固件共用相同的解压格式，但编码时的 LZ 与 Huffman
+选择规则不同。该替代规则由 CTurt 的 CFW-Suite 复现；参考实现为
+[`compression.c`](https://github.com/CTurt/CFW-Suite/blob/f2f2ca1e6a31e7c32edd02682a539a224ec015b7/guiTool/source/compression.c)。
+`dsfwtool -p3|-p4|-p5 -comp -flashme` 会显式选择此规则。
+
+- 在相同的 2048 字节窗口中从近到远搜索；不做 lazy 前瞻；完整匹配长度相等时保留
+  最近的候选。
+- 选择候选时比较到输入的有效末尾，仅在写出 token 时才把匹配长度截断到 258 字节。
+- 每轮都按既有数组顺序扫描活动的叶节点和父节点来构建 Huffman 树。严格比较会让
+  等权节点保留较早顺序；选出的两个节点依次成为左、右孩子。
+- 主流仍按 4 字节对齐以确定距离流偏移；距离流只保留最后实际消耗的字节。固件组装器
+  在组件有效末尾之后补写物理零对齐。
+
+该模式只适用于主 P3/P4/P5 的压缩。P1/P2 仍使用单独复现的官方 P12 压缩器，且不识别
+`-flashme`。
