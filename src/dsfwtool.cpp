@@ -871,14 +871,13 @@ static int apply_header_edits(Blob *header_blob, const HeaderEdits *edits)
     return 0;
 }
 
-/* Offline FlashMe repair pass.  Component patches construct H and FH from the
-   same original header.  Once P1--P5 have been placed, H owns every common
-   field: identifiers, configuration data, component descriptors and CRCs, and
-   the original-firmware marker at 0x17E.  FH retains only its FP1/FP2
-   descriptor at 0x0C--0x13 and its independent FlashMe type at 0x17C.  This
-   matches the official V1--V8 templates, which carry the same CRC fields in H
-   and FH.  A correct H can therefore repair a stale FH without erasing the
-   latter's boot targets. */
+/* Offline FlashMe header synchronization.  Component patches construct H and
+   FH from the same original header.  After H has been fully recalculated, it
+   is authoritative for every shared field, including all component CRC16s,
+   Wi-Fi configuration data and its CRC16, and the original-firmware marker at
+   0x17E.  FH differs only in its FP1/FP2 ROM/RAM descriptor at 0x0C--0x13 and
+   its independent FlashMe type at 0x17C; restore just those fields after
+   copying H. */
 static int sync_flashme_header_from_primary(Blob *primary_blob, Blob *flash_blob)
 {
     const u32 p12_descriptor_offset = (u32)offsetof(FW_HEADER, part1_romaddr);
@@ -2367,8 +2366,7 @@ static int command_explicit_create(int argc, char **argv)
     if (has_flashme) {
         if (sync_flashme_header_from_primary(&header, &flash_header) != 0) goto cleanup;
         secondary_header = (FW_HEADER *)flash_header.data;
-        if (set_flashme_component_offsets(secondary_header, flash_new_offsets) != 0 ||
-            update_header_config_checksum(&flash_header) != 0) goto cleanup;
+        if (set_flashme_component_offsets(secondary_header, flash_new_offsets) != 0) goto cleanup;
     }
 
     if (blob_alloc(&output, output_size) != 0) goto cleanup;
