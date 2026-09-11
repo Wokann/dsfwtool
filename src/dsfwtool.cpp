@@ -1157,7 +1157,6 @@ static int compress_p345(const Blob *plain, Blob *compressed)
 {
     unsigned long long capacity64;
     u32 actual_size;
-    u32 effective_size;
 
     blob_init(compressed);
     if (plain->size == 0 || plain->size > 0xFFFFFFu) {
@@ -1176,17 +1175,9 @@ static int compress_p345(const Blob *plain, Blob *compressed)
         blob_free(compressed);
         return -1;
     }
-    /* The encoder pads its two bitstreams to 32 bits.  Firmware component
-       boundaries, however, are defined by the decoder's last consumed byte.
-       Retain only that effective stream, so a P3/P4/P5 component neither
-       gains a synthetic zero byte nor shifts the next component. */
-    effective_size = getCompressedPart345Size(compressed->data);
-    if (effective_size < 12 || effective_size > actual_size) {
-        print_error("P3/P4/P5 encoder produced an invalid effective size");
-        blob_free(compressed);
-        return -1;
-    }
-    compressed->size = effective_size;
+    /* compress_part345() returns the exact byte range consumed by the
+       decoder.  Image-only alignment zeroes are written later by -c. */
+    compressed->size = actual_size;
     return 0;
 }
 

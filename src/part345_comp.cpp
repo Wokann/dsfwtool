@@ -305,6 +305,19 @@ static u32 swap32(u32 value) {
 	return dst[0] | dst[1] << 8 | dst[2] << 16 | dst[3] << 24;
 }
 
+/* The first stream's word alignment is part of the P345 format: its padded
+   end is stored as the second stream's offset.  The final stream is
+   different.  It only needs its last partially written byte to be flushed;
+   physical word/component alignment belongs to the firmware packer. */
+static void bitstream_finish_byte(BITSTREAM *stream) {
+	while(stream->bit != 0) bitstream_write(stream, 1, 0);
+}
+
+static void bitstream_pad_to_word(BITSTREAM *stream) {
+	bitstream_finish_byte(stream);
+	while((stream->pos % 4) != 0) bitstream_write(stream, 8, 0);
+}
+
 u32 compress_part345(u8 *dst, u8 *src, u32 size) {
 	u32 i, back, length;
 	bool commit_match;
@@ -312,7 +325,7 @@ u32 compress_part345(u8 *dst, u8 *src, u32 size) {
 	PNODE tree[2];
 	PDPV_TABLE dpv[2];
 	BITSTREAM bs[2], bsdst;
-	u32 bitlen[2], ret, stream_capacity;
+	u32 bitlen[2], effective_size, stored_size, stream_capacity;
 
 	if(dst == NULL || src == NULL || size == 0 || size > 0xFFFFFFu) return 0;
 	stream_capacity = size * 2u + 0x10000u;
@@ -384,17 +397,20 @@ u32 compress_part345(u8 *dst, u8 *src, u32 size) {
 		}
 	}
 	
-	// finish bitstream (multiple of 4 byte)
-	for(i = 0; i < 2; i++) {
-		while(((bs[i].pos % 4) != 0) || (bs[i].bit != 0)) bitstream_write(&bs[i], 1, 0);
-	}
+	/* The first stream ends at a format-defined word boundary.  For the second
+	   stream, retain only its final partially occupied byte.  `stored_size`
+	   remains word-aligned in the on-stream header so a firmware image writer
+	   can materialize the required trailing zeroes separately. */
+	bitstream_pad_to_word(&bs[0]);
+	bitstream_finish_byte(&bs[1]);
+	effective_size = 12 + bs[0].pos + bs[1].pos;
+	stored_size = 12 + bs[0].pos + ((bs[1].pos + 3u) & ~3u);
 	
 	// combine data
-	ret = 12 + bs[0].pos + bs[1].pos;
-	memset(dst, 0, ret);
+	memset(dst, 0, effective_size);
 	bitstream_clear(&bsdst);
 	bsdst.ptr = dst;
-	bitstream_write(&bsdst, 8 * 3, swap32(ret * 4) >> 8);
+	bitstream_write(&bsdst, 8 * 3, swap32(stored_size * 4) >> 8);
 	bitstream_write(&bsdst, 8 * 1, 0x80);
 	bitstream_write(&bsdst, 8 * 1, 0x80);
 	bitstream_write(&bsdst, 8 * 3, size);
@@ -408,7 +424,7 @@ u32 compress_part345(u8 *dst, u8 *src, u32 size) {
 	// free bitstream data
 	for(i = 0; i < 2; i++) free(bs[i].ptr);
 	
-	return ret;
+	return effective_size;
 }
 
 u32 getCompressedPart345Size(u8 *src) {
