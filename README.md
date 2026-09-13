@@ -101,7 +101,7 @@ dsfwtool -c OUTPUT.bin -h HEADER.bin
   -p5 [-comp [-flashme]] [--offset OFFSET] FILE
   [-fh [--offset OFFSET] FLASH_HEADER.bin
    -fp1 [-comp [-tvout]] [--offset OFFSET] FILE -fp2 [-comp [-tvout]] [--offset OFFSET] FILE]
-  [-b BASE.bin] [-s 256K|512K|1M|auto] [--fill 00|FF]
+  [-b BASE.bin] [--no-stream-padding] [-s 256K|512K|1M|auto] [--fill 00|FF]
   [header-edit options]
 
 dsfwtool -p1|-p2|-p3|-p4|-p5|-fp1|-fp2
@@ -114,8 +114,10 @@ P1/P2 `-uncomp` is valid only after `-decrypt`; if either P1 or P2 is
 decrypted during `-x`, `-h` must be exported in the same command because it
 provides the key material.
 
-`-c` always requires `-h` and all of P1 through P5. If any FlashMe artifact
-is supplied, `-fh`, `-fp1`, and `-fp2` must all be supplied. P1/P2 with no
+Without `-b`, `-c` requires `-h` and all of P1 through P5. If any FlashMe
+artifact is supplied without `-b`, `-fh`, `-fp1`, and `-fp2` must all be
+supplied. With `-b`, `-h` and any component may be omitted: the base header
+or component is retained unless a replacement is supplied. P1/P2 with no
 modifier are already encrypted P12 streams. `-encrypt` accepts an
 already-compressed, unencrypted P12 stream; `-comp -encrypt` accepts plaintext
 and performs both stages. P3/P4/P5 use `-comp` for plaintext: by default it
@@ -157,6 +159,28 @@ missing final settings sectors transfers the bytes it does contain and leaves
 unavailable output bytes at the selected fill value. The firmware's 16-bit,
 divide-by-eight user-settings pointer can address this trailing layout through
 512 KiB; `-b` therefore rejects a larger target size.
+
+When `BASE.bin` and the requested output have the same capacity, `-b` also
+initializes the whole output from the base before writing the explicit header
+and components. Thus bytes not covered by an explicitly supplied component
+(including gaps left when a replacement stream is shorter) retain their base
+value. `-h` remains the sole source of the generated primary header; `-b` does
+not override it. `--no-stream-padding` suppresses dsfwtool's normal automatic
+zero writes after effective component streams, preserving the corresponding
+base bytes as well. It is intended for an incremental patch layout, not for a
+fresh fill-based image.
+
+In this incremental form, `-h` and every primary-header edit option are
+forbidden: the primary header is always retained directly from the base. This
+prevents an unchanged component from being reused under a different key or
+layout parameter. An omitted component retains the base component at its
+original physical address. A replacement without its own `--offset` likewise
+uses that component's base address; `--offset` is the sole permitted firmware
+physical-address change in this mode, and dsfwtool updates the corresponding
+primary-header ROM address fields. All retained and new component ranges are
+checked together: a replacement may overwrite its own former range, but cannot
+overlap another primary component, FlashMe component, secondary header, or
+protected tail.
 
 `-p1` and `-p2` select P12. `-p3`, `-p4`, and `-p5` select P345. `-fp1` and
 `-fp2` select unencrypted P12. Encryption and decryption require `-h` and are

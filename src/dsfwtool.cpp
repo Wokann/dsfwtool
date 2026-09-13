@@ -1466,7 +1466,7 @@ static void print_usage(void)
     printf("      -p5 [-comp [-flashme]] [--offset OFFSET] FILE\n");
     printf("      [-fh [--offset OFFSET] FLASH_HEADER.bin\n");
     printf("       -fp1 [-comp [-tvout]] [--offset OFFSET] FILE -fp2 [-comp [-tvout]] [--offset OFFSET] FILE]\n");
-    printf("      [-b BASE.bin] [-s 256K|512K|1M|auto] [--fill 00|FF]\n");
+    printf("      [-b BASE.bin] [--no-stream-padding] [-s 256K|512K|1M|auto] [--fill 00|FF]\n");
     printf("  P1/P2 with no modifier are already encrypted P12 streams.  -encrypt\n");
     printf("  encrypts an already compressed P12 stream; -comp -encrypt compresses\n");
     printf("  plain data before encryption.  Append -tvout to P12 -comp to use the V8a\n");
@@ -1485,6 +1485,9 @@ static void print_usage(void)
     printf("  0x7F680 at 512 KiB) for compatibility.\n");
     printf("  Unused output bytes are filled with FF by default (override with --fill).\n");
     printf("  -b transfers the base firmware's 0x600-byte settings tail (through 512 KiB).\n");
+    printf("  When the base and output have the same capacity, -b also preserves base bytes\n");
+    printf("  outside explicitly written component streams.  --no-stream-padding suppresses\n");
+    printf("  automatic zero padding after effective component streams.\n");
     printf("  In FlashMe mode, components may deliberately replace its Wi-Fi-area bytes.\n");
     printf("\n");
     printf("Independent component operations:\n");
@@ -1552,6 +1555,7 @@ typedef struct {
     const char *base_path;
     const char *size_text;
     u8 fill_byte;
+    int no_stream_padding;
     HeaderEdits edits;
 } ExplicitFirmwareRequest;
 
@@ -1778,6 +1782,10 @@ static int parse_explicit_firmware_request(int argc, char **argv, int first_opti
                 parse_fill_byte(value, &request->fill_byte) != 0) return -1;
             continue;
         }
+        if (create && strcmp(argv[i], "--no-stream-padding") == 0) {
+            request->no_stream_padding = 1;
+            continue;
+        }
         if (create) {
             edit_result = parse_header_edit_option(argc, argv, &i, &request->edits);
             if (edit_result < 0) return -1;
@@ -1817,20 +1825,32 @@ static int validate_explicit_firmware_request(const ExplicitFirmwareRequest *req
         return 0;
     }
 
-    if (request->components[FWCOMP_HEADER].path == NULL) {
-        print_error("-c requires -h HEADER.bin");
-        return -1;
-    }
-    for (i = FWCOMP_P1; i <= FWCOMP_P5; i++) {
-        if (request->components[i].path == NULL) {
-            print_error("-c requires %s", explicit_component_name(i));
+    if (request->base_path == NULL) {
+        if (request->components[FWCOMP_HEADER].path == NULL) {
+            print_error("-c requires -h HEADER.bin unless -b supplies a base header");
             return -1;
         }
+        for (i = FWCOMP_P1; i <= FWCOMP_P5; i++) {
+            if (request->components[i].path == NULL) {
+                print_error("-c requires %s unless -b supplies a base component",
+                            explicit_component_name(i));
+                return -1;
+            }
+        }
+    }
+    if (request->base_path != NULL &&
+        (request->components[FWCOMP_HEADER].path != NULL ||
+         request->edits.has_identifier || request->edits.has_timestamp ||
+         request->edits.raw_count != 0)) {
+        print_error("-b incremental creation cannot replace or edit the primary header; "
+                    "use per-component --offset to set firmware addresses");
+        return -1;
     }
     flashme_any = request->components[FWCOMP_FLASH_HEADER].path != NULL ||
                    request->components[FWCOMP_FLASH_P1].path != NULL ||
                    request->components[FWCOMP_FLASH_P2].path != NULL;
-    if (flashme_any && (request->components[FWCOMP_FLASH_HEADER].path == NULL ||
+    if (request->base_path == NULL && flashme_any &&
+        (request->components[FWCOMP_FLASH_HEADER].path == NULL ||
                         request->components[FWCOMP_FLASH_P1].path == NULL ||
                         request->components[FWCOMP_FLASH_P2].path == NULL)) {
         print_error("FlashMe creation requires -fh, -fp1, and -fp2 together");
@@ -2200,6 +2220,7 @@ static int command_explicit_create(int argc, char **argv)
     Blob header;
     Blob flash_header;
     Blob base;
+    FirmwareLayout base_layout;
     Blob primary_parts[5];
     Blob flash_parts[2];
     Blob output;
@@ -2236,6 +2257,7 @@ static int command_explicit_create(int argc, char **argv)
     u16 target_user_settings_offset = 0;
     u16 flashme_source_part34_crc16 = 0;
     int automatic_size = 1;
+    int base_has_layout = 0;
     int has_flashme;
     int flash_header_has_override = 0;
     FirmwareRange ranges[MAX_RANGES];
@@ -2246,6 +2268,7 @@ static int command_explicit_create(int argc, char **argv)
     blob_init(&header);
     blob_init(&flash_header);
     blob_init(&base);
+    memset(&base_layout, 0, sizeof(base_layout));
     blob_init(&output);
     for (i = 0; i < 5; i++) blob_init(&primary_parts[i]);
     for (i = 0; i < 2; i++) blob_init(&flash_parts[i]);
@@ -2257,21 +2280,60 @@ static int command_explicit_create(int argc, char **argv)
     output_path = argv[2];
     if (parse_explicit_firmware_request(argc, argv, 3, 1, &request) != 0 ||
         validate_explicit_firmware_request(&request, 1) != 0) goto cleanup;
-    has_flashme = request.components[FWCOMP_FLASH_HEADER].path != NULL;
     if (request.base_path != NULL &&
         (read_file(request.base_path, &base) != 0 ||
-         get_base_settings_tail(&base, &base_settings_tail_offset, &base_settings_tail_size) != 0)) {
+         get_base_settings_tail(&base, &base_settings_tail_offset, &base_settings_tail_size) != 0 ||
+         parse_firmware_layout(&base, &base_layout, 1) != 0)) {
         goto cleanup;
     }
-    if (read_header_file(request.components[FWCOMP_HEADER].path, &header) != 0 ||
-        apply_header_edits(&header, &request.edits) != 0) goto cleanup;
+    base_has_layout = request.base_path != NULL;
+    has_flashme = request.components[FWCOMP_FLASH_HEADER].path != NULL ||
+                  request.components[FWCOMP_FLASH_P1].path != NULL ||
+                  request.components[FWCOMP_FLASH_P2].path != NULL ||
+                  (base_has_layout && base_layout.has_flashme);
+    if (request.components[FWCOMP_HEADER].path != NULL) {
+        if (read_header_file(request.components[FWCOMP_HEADER].path, &header) != 0) goto cleanup;
+    } else if (base_has_layout) {
+        if (blob_copy_data(&header, base.data, HEADER_BYTES) != 0) goto cleanup;
+    } else {
+        print_error("-c requires -h HEADER.bin unless -b supplies a base header");
+        goto cleanup;
+    }
+    if (apply_header_edits(&header, &request.edits) != 0) goto cleanup;
     primary_header = (FW_HEADER *)header.data;
     flashme_source_part34_crc16 = primary_header->part34_crc16;
 
+    if (base_has_layout) {
+        for (i = 0; i < 5; i++) {
+            if (!request.components[FWCOMP_P1 + i].has_offset) {
+                request.components[FWCOMP_P1 + i].has_offset = 1;
+                request.components[FWCOMP_P1 + i].offset = base_layout.offsets[i];
+            }
+        }
+        if (base_layout.has_flashme) {
+            if (!request.components[FWCOMP_FLASH_HEADER].has_offset) {
+                request.components[FWCOMP_FLASH_HEADER].has_offset = 1;
+                request.components[FWCOMP_FLASH_HEADER].offset = base_layout.flashme_header_offset;
+            }
+            for (i = 0; i < 2; i++) {
+                if (!request.components[FWCOMP_FLASH_P1 + i].has_offset) {
+                    request.components[FWCOMP_FLASH_P1 + i].has_offset = 1;
+                    request.components[FWCOMP_FLASH_P1 + i].offset = base_layout.flashme_offsets[i];
+                }
+            }
+        }
+    }
+
     for (i = 0; i < 5; i++) {
         int component = FWCOMP_P1 + i;
-        if (prepare_component_for_create(component, &request.components[component], primary_header,
-                                         has_flashme, &primary_parts[i]) != 0 ||
+        if ((request.components[component].path != NULL &&
+             prepare_component_for_create(component, &request.components[component], primary_header,
+                                          has_flashme, &primary_parts[i]) != 0) ||
+            (request.components[component].path == NULL &&
+             (!base_has_layout ||
+              blob_copy_data(&primary_parts[i], base.data + base_layout.offsets[i],
+                             i < 2 ? base_layout.spans[i] :
+                                     base_layout.effective_sizes[i]) != 0)) ||
             component_span(&primary_parts[i], &primary_reserved_sizes[i]) != 0) goto cleanup;
         primary_original_offsets[i] = primary_part_offset(primary_header, i);
         primary_alignments[i] = primary_part_alignment(primary_header, i);
@@ -2280,13 +2342,26 @@ static int command_explicit_create(int argc, char **argv)
     }
     if (has_flashme) {
         flash_header_has_override = request.components[FWCOMP_FLASH_HEADER].has_offset;
-        if (read_header_file(request.components[FWCOMP_FLASH_HEADER].path, &flash_header) != 0 ||
-            sync_flashme_header_from_primary(&header, &flash_header) != 0) goto cleanup;
+        if (request.components[FWCOMP_FLASH_HEADER].path != NULL) {
+            if (read_header_file(request.components[FWCOMP_FLASH_HEADER].path, &flash_header) != 0) goto cleanup;
+        } else if (base_has_layout && base_layout.has_flashme) {
+            if (blob_copy_data(&flash_header, base.data + base_layout.flashme_header_offset,
+                               HEADER_BYTES) != 0) goto cleanup;
+        } else {
+            print_error("FlashMe creation requires -fh unless -b supplies a FlashMe header");
+            goto cleanup;
+        }
+        if (sync_flashme_header_from_primary(&header, &flash_header) != 0) goto cleanup;
         secondary_header = (FW_HEADER *)flash_header.data;
         for (i = 0; i < 2; i++) {
             int component = FWCOMP_FLASH_P1 + i;
-            if (prepare_component_for_create(component, &request.components[component], primary_header,
-                                             0, &flash_parts[i]) != 0 ||
+            if ((request.components[component].path != NULL &&
+                 prepare_component_for_create(component, &request.components[component], primary_header,
+                                              0, &flash_parts[i]) != 0) ||
+                (request.components[component].path == NULL &&
+                 (!base_has_layout || !base_layout.has_flashme ||
+                  blob_copy_data(&flash_parts[i], base.data + base_layout.flashme_offsets[i],
+                                 base_layout.flashme_effective_sizes[i]) != 0)) ||
                 component_span(&flash_parts[i], &flash_reserved_sizes[i]) != 0) goto cleanup;
             flash_original_offsets[i] = flashme_part_offset(secondary_header, i);
             flash_alignments[i] = flashme_part_alignment(secondary_header, i);
@@ -2442,7 +2517,11 @@ static int command_explicit_create(int argc, char **argv)
     }
 
     if (blob_alloc(&output, output_size) != 0) goto cleanup;
-    memset(output.data, request.fill_byte, output.size);
+    if (request.base_path != NULL && base.size == output_size) {
+        memcpy(output.data, base.data, output.size);
+    } else {
+        memset(output.data, request.fill_byte, output.size);
+    }
     memcpy(output.data, header.data, HEADER_BYTES);
     /* A normal image reserves the whole copied 0x600 tail.  FlashMe v1--v4,
        however, may put code in the preceding Wi-Fi area, so lay down the
@@ -2461,7 +2540,8 @@ static int command_explicit_create(int argc, char **argv)
             memcpy(output.data + flash_new_offsets[i], flash_parts[i].data, flash_parts[i].size);
         }
     }
-    if (write_all_effective_stream_alignment_padding(&output, primary_new_offsets, primary_parts,
+    if (!request.no_stream_padding &&
+        write_all_effective_stream_alignment_padding(&output, primary_new_offsets, primary_parts,
                                                      flash_new_offsets, flash_parts, has_flashme,
                                                      flash_header_offset,
                                                      protected_tail_offset) != 0) goto cleanup;
@@ -2492,7 +2572,11 @@ static int command_explicit_create(int argc, char **argv)
                     "the remaining 0x%03X bytes use the output fill value\n",
                     base_copy_expected_size - base_copy_size);
         }
+        if (base.size == output_size) {
+            printf("  Base image: preserved outside explicit component streams\n");
+        }
     }
+    if (request.no_stream_padding) printf("  Effective stream padding: preserved\n");
     result = 0;
 
 cleanup:
