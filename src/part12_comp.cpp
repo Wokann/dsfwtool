@@ -200,3 +200,91 @@ u32 compressLZ77(u8 *dst, const u8 *src, u32 size) {
 
     return outPos;
 }
+
+/* The V8a TV-out FP2 stream uses the LZ-CUE one-token lookahead rule rather
+   than the default immediate-match rule above. Search from the far end of
+   the VRAM-safe window, so equal-length matches retain the farthest distance. */
+static u8 findTvOutMatch(const u8 *begin, const u8 *cursor, const u8 *end,
+                         u16 *offset) {
+    u32 history = (u32)(cursor - begin);
+    u8 bestLength = 2;
+    u16 bestOffset = 0;
+
+    if (history > WINDOW_SIZE) history = WINDOW_SIZE;
+    while (history > 1) {
+        u8 length = 0;
+        while (length < MAX_MATCH && cursor + length < end &&
+               cursor[length] == *(cursor - history + length)) {
+            ++length;
+        }
+        if (length > bestLength) {
+            bestLength = length;
+            bestOffset = (u16)history;
+            if (bestLength == MAX_MATCH) break;
+        }
+        --history;
+    }
+    if (bestLength < 3) return 0;
+    *offset = bestOffset;
+    return bestLength;
+}
+
+u32 compressLZ77TvOut(u8 *dst, const u8 *src, u32 size) {
+    const u8 *begin;
+    const u8 *cursor;
+    const u8 *end;
+    u32 outPos = 0;
+
+    if (!src || !dst || size == 0 || size > 0xFFFFFFu) return 0;
+
+    begin = src;
+    cursor = src;
+    end = src + size;
+    dst[outPos++] = LZ_HEADER;
+    dst[outPos++] = (u8)(size & 0xFF);
+    dst[outPos++] = (u8)((size >> 8) & 0xFF);
+    dst[outPos++] = (u8)((size >> 16) & 0xFF);
+
+    while (cursor < end) {
+        u8 flags = 0;
+        u32 flagPos = outPos++;
+        int bit;
+
+        for (bit = 0; bit < 8; ++bit) {
+            u8 matchLength;
+            u16 offset = 0;
+
+            flags <<= 1;
+            if (cursor == end) continue;
+            matchLength = findTvOutMatch(begin, cursor, end, &offset);
+
+            /* Compare committing this match plus its next token with one
+               literal followed by the match available at the next byte. */
+            if (matchLength != 0 && cursor + matchLength < end) {
+                u8 afterLength;
+                u8 nextLength;
+                u16 unusedOffset;
+
+                afterLength = findTvOutMatch(begin, cursor + matchLength, end,
+                                              &unusedOffset);
+                nextLength = findTvOutMatch(begin, cursor + 1, end, &unusedOffset);
+                if (afterLength < 3) afterLength = 1;
+                if (nextLength < 3) nextLength = 1;
+                if ((u16)matchLength + afterLength <= (u16)1 + nextLength) {
+                    matchLength = 0;
+                }
+            }
+
+            if (matchLength != 0) {
+                flags |= 1;
+                dst[outPos++] = (u8)(((matchLength - 3) << 4) | ((offset - 1) >> 8));
+                dst[outPos++] = (u8)((offset - 1) & 0xFF);
+                cursor += matchLength;
+            } else {
+                dst[outPos++] = *cursor++;
+            }
+        }
+        dst[flagPos] = flags;
+    }
+    return outPos;
+}

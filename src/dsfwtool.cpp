@@ -1130,7 +1130,7 @@ static int encrypt_p12(const FW_HEADER *header, const Blob *compressed, Blob *en
     return 0;
 }
 
-static int compress_p12(const Blob *plain, Blob *compressed)
+static int compress_p12(const Blob *plain, Blob *compressed, int tvout)
 {
     u32 capacity;
     u32 actual_size;
@@ -1146,7 +1146,9 @@ static int compress_p12(const Blob *plain, Blob *compressed)
     }
     capacity = (u32)plain->size + ((u32)plain->size + 7) / 8 + 16;
     if (blob_alloc(compressed, capacity) != 0) return -1;
-    actual_size = compressLZ77(compressed->data, plain->data, (u32)plain->size);
+    actual_size = tvout ?
+                  compressLZ77TvOut(compressed->data, plain->data, (u32)plain->size) :
+                  compressLZ77(compressed->data, plain->data, (u32)plain->size);
     if (actual_size == 0 || actual_size > capacity) {
         print_error("P1/P2 compression failed");
         blob_free(compressed);
@@ -1457,17 +1459,18 @@ static void print_usage(void)
     printf("\n");
     printf("Create an official firmware image:\n");
     printf("  dsfwtool -c OUTPUT.bin -h HEADER.bin\n");
-    printf("      -p1 [-encrypt | -comp -encrypt] [--offset OFFSET] FILE\n");
-    printf("      -p2 [-encrypt | -comp -encrypt] [--offset OFFSET] FILE\n");
+    printf("      -p1 [-encrypt | -comp [-tvout] -encrypt] [--offset OFFSET] FILE\n");
+    printf("      -p2 [-encrypt | -comp [-tvout] -encrypt] [--offset OFFSET] FILE\n");
     printf("      -p3 [-comp [-flashme]] [--offset OFFSET] FILE\n");
     printf("      -p4 [-comp [-flashme]] [--offset OFFSET] FILE\n");
     printf("      -p5 [-comp [-flashme]] [--offset OFFSET] FILE\n");
     printf("      [-fh [--offset OFFSET] FLASH_HEADER.bin\n");
-    printf("       -fp1 [-comp] [--offset OFFSET] FILE -fp2 [-comp] [--offset OFFSET] FILE]\n");
+    printf("       -fp1 [-comp [-tvout]] [--offset OFFSET] FILE -fp2 [-comp [-tvout]] [--offset OFFSET] FILE]\n");
     printf("      [-b BASE.bin] [-s 256K|512K|1M|auto] [--fill 00|FF]\n");
     printf("  P1/P2 with no modifier are already encrypted P12 streams.  -encrypt\n");
     printf("  encrypts an already compressed P12 stream; -comp -encrypt compresses\n");
-    printf("  plain data before encryption.  P3/P4/P5 -comp uses retail P345 compression;\n");
+    printf("  plain data before encryption.  Append -tvout to P12 -comp to use the V8a\n");
+    printf("  TV-out LZ-CUE compatibility rule.  P3/P4/P5 -comp uses retail P345 compression;\n");
     printf("  append -flashme after -comp to reproduce FlashMe's CTurt/CFW-Suite P345 rule.\n");
     printf("  P3/P5 effective streams are zero-padded through the next 8-byte boundary;\n");
     printf("  FlashMe P4 is zero-padded to a 16-byte boundary relative to its own start.\n");
@@ -1485,7 +1488,7 @@ static void print_usage(void)
     printf("  In FlashMe mode, components may deliberately replace its Wi-Fi-area bytes.\n");
     printf("\n");
     printf("Independent component operations:\n");
-    printf("  dsfwtool -p1 -comp INPUT.bin -o OUTPUT.bin\n");
+    printf("  dsfwtool -p1 -comp [-tvout] INPUT.bin -o OUTPUT.bin\n");
     printf("  dsfwtool -p1 -uncomp INPUT.bin -o OUTPUT.bin\n");
     printf("  dsfwtool -p1 -crypt INPUT.bin -h HEADER.bin -o OUTPUT.bin\n");
     printf("  dsfwtool -p2 -decrypt INPUT.bin -h HEADER.bin -o OUTPUT.bin\n");
@@ -1495,13 +1498,14 @@ static void print_usage(void)
     printf("  dsfwtool -p3 -comp -flashme INPUT.bin -o OUTPUT.bin\n");
     printf("  dsfwtool -p3 -uncomp INPUT.bin -o OUTPUT.bin\n");
     printf("  -p1/-p2 select P12; -p3/-p4/-p5 select P345 automatically.  -flashme\n");
-    printf("  is recognised only immediately after P3/P4/P5 -comp, never for P12.\n");
+    printf("  is recognised only immediately after P3/P4/P5 -comp.  -tvout is recognised\n");
+    printf("  only immediately after a P12 -comp and preserves the default otherwise.\n");
     printf("  P1/P2 crypt/decrypt requires -h because fw_identifier supplies the key.\n");
     printf("  Decryption requires a complete 8-byte-aligned ciphertext and writes only the effective P12 stream;\n");
     printf("  encryption preserves an aligned input and completes a partial final block internally.\n");
     printf("\n");
     printf("FlashMe components (select as needed with -x; supply all three with -c):\n");
-    printf("  -fh FLASH_HEADER.bin  -fp1 [-comp|-uncomp] FILE  -fp2 [-comp|-uncomp] FILE\n");
+    printf("  -fh FLASH_HEADER.bin  -fp1 [-comp [-tvout]|-uncomp] FILE  -fp2 [-comp [-tvout]|-uncomp] FILE\n");
     printf("  dsfwtool -fp1 -uncomp INPUT.bin -o OUTPUT.bin\n");
     printf("  dsfwtool -fp1 -comp INPUT.bin -o OUTPUT.bin\n");
     printf("  FlashMe FP1/FP2 are unencrypted P12/LZ77 streams; -encrypt/-decrypt is invalid.\n");
@@ -1537,6 +1541,7 @@ typedef struct {
     u32 offset;
     int compress;
     int flashme_compress;
+    int tvout_compress;
     int encrypt;
     int decrypt;
     int uncompress;
@@ -1557,6 +1562,7 @@ typedef struct {
     const char *output_path;
     int compress;
     int flashme_compress;
+    int tvout_compress;
     int uncompress;
     int encrypt;
     int decrypt;
@@ -1661,6 +1667,10 @@ static int parse_explicit_component(int argc, char **argv, int *index, int creat
             if (*index < argc && strcmp(argv[*index], "-comp") == 0) {
                 entry->compress = 1;
                 ++*index;
+                if (*index < argc && strcmp(argv[*index], "-tvout") == 0) {
+                    entry->tvout_compress = 1;
+                    ++*index;
+                }
                 if (*index >= argc || !is_encrypt_option(argv[*index])) {
                     print_error("%s -comp must be followed by -encrypt", explicit_component_name(component));
                     return -1;
@@ -1690,7 +1700,11 @@ static int parse_explicit_component(int argc, char **argv, int *index, int creat
             if (*index < argc && strcmp(argv[*index], "-comp") == 0) {
                 entry->compress = 1;
                 ++*index;
-                if (is_primary_p345_component(component) && *index < argc &&
+                if (is_flashme_p12_component(component) && *index < argc &&
+                    strcmp(argv[*index], "-tvout") == 0) {
+                    entry->tvout_compress = 1;
+                    ++*index;
+                } else if (is_primary_p345_component(component) && *index < argc &&
                     strcmp(argv[*index], "-flashme") == 0) {
                     entry->flashme_compress = 1;
                     ++*index;
@@ -2145,7 +2159,8 @@ static int prepare_component_for_create(int component, const ExplicitComponent *
         goto cleanup;
     }
     if (request->compress) {
-        if (is_p12_component(component)) result = compress_p12(&source, &transformed);
+        if (is_p12_component(component)) result = compress_p12(&source, &transformed,
+                                                                request->tvout_compress);
         else result = compress_p345(&source, &transformed, request->flashme_compress);
         if (result != 0) goto cleanup;
         blob_free(&source);
@@ -2525,7 +2540,11 @@ static int parse_explicit_stream_request(int argc, char **argv, ExplicitStreamRe
                 return -1;
             }
             request->compress = 1;
-            if (is_primary_p345_component(request->component) && i + 1 < argc &&
+            if (is_p12_component(request->component) && i + 1 < argc &&
+                strcmp(argv[i + 1], "-tvout") == 0) {
+                request->tvout_compress = 1;
+                ++i;
+            } else if (is_primary_p345_component(request->component) && i + 1 < argc &&
                 strcmp(argv[i + 1], "-flashme") == 0) {
                 request->flashme_compress = 1;
                 ++i;
@@ -2639,7 +2658,7 @@ static int command_explicit_stream(int argc, char **argv)
     }
     if (request.compress) {
         int compress_result = is_p12_component(request.component)
-                                  ? compress_p12(current, &stage3)
+                                  ? compress_p12(current, &stage3, request.tvout_compress)
                                   : compress_p345(current, &stage3, request.flashme_compress);
         if (compress_result != 0) goto cleanup;
         current = &stage3;

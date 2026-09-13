@@ -82,18 +82,18 @@ dsfwtool -x FIRMWARE.bin
   [-fh FLASH_HEADER.bin -fp1 [-uncomp] FILE -fp2 [-uncomp] FILE]
 
 dsfwtool -c OUTPUT.bin -h HEADER.bin
-  -p1 [-encrypt | -comp -encrypt] [--offset OFFSET] FILE
-  -p2 [-encrypt | -comp -encrypt] [--offset OFFSET] FILE
+  -p1 [-encrypt | -comp [-tvout] -encrypt] [--offset OFFSET] FILE
+  -p2 [-encrypt | -comp [-tvout] -encrypt] [--offset OFFSET] FILE
   -p3 [-comp [-flashme]] [--offset OFFSET] FILE
   -p4 [-comp [-flashme]] [--offset OFFSET] FILE
   -p5 [-comp [-flashme]] [--offset OFFSET] FILE
   [-fh [--offset OFFSET] FLASH_HEADER.bin
-   -fp1 [-comp] [--offset OFFSET] FILE -fp2 [-comp] [--offset OFFSET] FILE]
+   -fp1 [-comp [-tvout]] [--offset OFFSET] FILE -fp2 [-comp [-tvout]] [--offset OFFSET] FILE]
   [-b BASE.bin] [-s 256K|512K|1M|auto] [--fill 00|FF]
   [头部修改参数]
 
 dsfwtool -p1|-p2|-p3|-p4|-p5|-fp1|-fp2
-  (-comp|-uncomp|-crypt|-decrypt) INPUT.bin [-h HEADER.bin] -o OUTPUT.bin
+  (-comp [-tvout]|-uncomp|-crypt|-decrypt) INPUT.bin [-h HEADER.bin] -o OUTPUT.bin
 ```
 
 `-i` 只读取布局信息。`-x` 至少需要指定一个输出文件；不带修饰词时，组件保持
@@ -106,7 +106,9 @@ dsfwtool -p1|-p2|-p3|-p4|-p5|-fp1|-fp2
 加密。P3/P4/P5 用 `-comp` 输入明文：默认采用官方固件的 P345 编码器；
 `-comp -flashme` 则选择由 CTurt 的 CFW-Suite 复现的 FlashMe P345 规则。
 `-flashme` 只能紧跟在 P3/P4/P5 的 `-comp` 后，P12 不存在该参数。
-独立 P1/P2 操作中，`-crypt` 是 `-encrypt` 的同义写法。
+独立 P1/P2 操作中，`-crypt` 是 `-encrypt` 的同义写法。`-tvout` 只能紧跟在 P12
+的 `-comp` 后；它选择在 FlashMe V8a TV-out FP2 流中实测到的 LZ-CUE、VRAM 安全
+匹配规则，不改变默认 P12 编码器。
 
 在 `-c` 中，`--offset OFFSET` 表示物理 ROM 字节地址；它必须放在该组件的转换修饰词
 之后、文件名之前。P1/P2/P3/P4/P5 和 FP1/FP2 必须满足各自头中编码的起始对齐，`-fh`
@@ -245,8 +247,9 @@ dsfwtool -c flashme-rebuilt.bin -s 512K \
   -fp1 -comp unpack/fp1.plain -fp2 -comp unpack/fp2.plain
 ```
 
-FP1/FP2 不带修饰词时输入的是已有未加密 P12 流，带 `-comp` 时输入明文。
-`-flashme` 只影响主 P3/P4/P5 的压缩路径，不适用于 P1/P2、FP1 或 FP2。
+FP1/FP2 不带修饰词时输入的是已有未加密 P12 流，带 `-comp` 时输入明文。需要复现
+V8a TV-out 的 LZ-CUE 流时，在 P12 的 `-comp` 后附加 `-tvout`；该选项可用于
+P1/P2、FP1/FP2，但不会自动启用。`-flashme` 只影响主 P3/P4/P5 的压缩路径。
 
 ## 单独处理压缩或加密流
 

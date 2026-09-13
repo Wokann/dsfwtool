@@ -71,6 +71,19 @@ leave the flag bit clear, write input[p], advance by one, and insert that byte.
 Write the completed flag byte into its reserved position. No lookahead or
 Huffman coding is applied to P1/P2.
 
+### FlashMe V8a TV-out compatibility profile
+
+The V8a TV-out image has one exception: its FP2 stream is still ordinary LZ10,
+but its token choices match the LZ-CUE one-token lookahead rule. Search the
+same 4096-byte window from farthest to nearest and retain the farthest match on
+a length tie; exclude distance 1, as in the default encoder. For a current
+match of length `L0`, also find the longest matches at `p + L0` and `p + 1`.
+Treat a no-match result as length 1. Emit a literal at `p` when
+`L0 + L(p + L0) <= 1 + L(p + 1)`; otherwise emit the current match. The
+implementation exposes this opt-in profile as `-comp -tvout` and keeps the
+default immediate, nearest-tie P12 encoder unchanged. On the recovered V8a
+TV-out FP2 plaintext, this reproduces the `0x855E`-byte stored stream exactly.
+
 ### KEY1-derived tail word and encrypted-block alignment
 
 The effective LZ stream ends at its last required token. To reproduce the

@@ -11,6 +11,7 @@ extern "C" {
 u32 decompressLZ77(u8 *dst, const u8 *src);
 u32 getCompressedLZ77Size(const u8 *src);
 u32 compressLZ77(u8 *dst, const u8 *src, u32 size);
+u32 compressLZ77TvOut(u8 *dst, const u8 *src, u32 size);
 
 #ifdef __cplusplus
 }

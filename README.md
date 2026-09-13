@@ -94,18 +94,18 @@ dsfwtool -x FIRMWARE.bin
   [-fh FLASH_HEADER.bin -fp1 [-uncomp] FILE -fp2 [-uncomp] FILE]
 
 dsfwtool -c OUTPUT.bin -h HEADER.bin
-  -p1 [-encrypt | -comp -encrypt] [--offset OFFSET] FILE
-  -p2 [-encrypt | -comp -encrypt] [--offset OFFSET] FILE
+  -p1 [-encrypt | -comp [-tvout] -encrypt] [--offset OFFSET] FILE
+  -p2 [-encrypt | -comp [-tvout] -encrypt] [--offset OFFSET] FILE
   -p3 [-comp [-flashme]] [--offset OFFSET] FILE
   -p4 [-comp [-flashme]] [--offset OFFSET] FILE
   -p5 [-comp [-flashme]] [--offset OFFSET] FILE
   [-fh [--offset OFFSET] FLASH_HEADER.bin
-   -fp1 [-comp] [--offset OFFSET] FILE -fp2 [-comp] [--offset OFFSET] FILE]
+   -fp1 [-comp [-tvout]] [--offset OFFSET] FILE -fp2 [-comp [-tvout]] [--offset OFFSET] FILE]
   [-b BASE.bin] [-s 256K|512K|1M|auto] [--fill 00|FF]
   [header-edit options]
 
 dsfwtool -p1|-p2|-p3|-p4|-p5|-fp1|-fp2
-  (-comp|-uncomp|-crypt|-decrypt) INPUT.bin [-h HEADER.bin] -o OUTPUT.bin
+  (-comp [-tvout]|-uncomp|-crypt|-decrypt) INPUT.bin [-h HEADER.bin] -o OUTPUT.bin
 ```
 
 `-i` reads layout information only. `-x` requires at least one named output.
@@ -122,7 +122,10 @@ and performs both stages. P3/P4/P5 use `-comp` for plaintext: by default it
 uses the retail P345 encoder, while `-comp -flashme` selects the FlashMe P345
 rule reconstructed by CTurt's CFW-Suite. `-flashme` is accepted only directly
 after `-comp` for P3/P4/P5; it is not a P12 option. `-crypt` is accepted as an
-alias of `-encrypt` for an independent P1/P2 operation.
+alias of `-encrypt` for an independent P1/P2 operation. `-tvout` is accepted
+only immediately after P12 `-comp`; it selects the LZ-CUE, VRAM-safe matching
+rule observed in the FlashMe V8a TV-out FP2 stream. It leaves the default P12
+encoder unchanged.
 
 In `-c`, `--offset OFFSET` is a physical ROM byte address placed after that
 component's transformation modifiers and before its file name. P1/P2/P3/P4/P5
@@ -287,8 +290,10 @@ dsfwtool -c flashme-rebuilt.bin -s 512K \
 ```
 
 For FP1/FP2, no modifier accepts an existing unencrypted P12 stream and
-`-comp` accepts plaintext. `-flashme` affects only the primary P3/P4/P5
-compression route; it does not apply to P1/P2 or FP1/FP2.
+`-comp` accepts plaintext. Append `-tvout` to a P12 `-comp` operation when
+reproducing the V8a TV-out LZ-CUE stream; it is available for P1/P2 and
+FP1/FP2 but is not selected automatically. `-flashme` affects only the
+primary P3/P4/P5 compression route.
 
 ## Header edits during creation
 
