@@ -1093,7 +1093,8 @@ static int decrypt_p12(const FW_HEADER *header, const Blob *encrypted, Blob *dec
     return 0;
 }
 
-static int encrypt_p12(const FW_HEADER *header, const Blob *compressed, Blob *encrypted)
+static int encrypt_p12(const FW_HEADER *header, const Blob *compressed, Blob *encrypted,
+                       int flashme_zero_padding)
 {
     u32 effective_size;
     u32 input_size;
@@ -1115,10 +1116,12 @@ static int encrypt_p12(const FW_HEADER *header, const Blob *compressed, Blob *en
     init_keycode(read_le32(header->fw_identifier), 2, 0x0C);
     /* p12_stream_size() validates the logical prefix, but intentionally does
        not shorten the caller's input.  A fully aligned P12 buffer may carry
-       an explicitly supplied official tail; encrypt_buffer() preserves all
-       supplied bytes and constructs official KEY1-derived padding only for
-       a partial final block, before encrypting it. */
-    output_size = encrypt_buffer(compressed->data, encrypted->data, (int)input_size);
+       an explicitly supplied tail.  Nintendo retail streams use the observed
+       KEY1-derived second word for a partial final block; FlashMe's P1/P2
+       streams instead use only zero padding. */
+    output_size = flashme_zero_padding ?
+        encrypt_buffer_zero_padded(compressed->data, encrypted->data, (int)input_size) :
+        encrypt_buffer(compressed->data, encrypted->data, (int)input_size);
     if (output_size < 0 || (u32)output_size != padded_size) {
         print_error("P1/P2 encryption failed");
         blob_free(encrypted);
@@ -1466,8 +1469,9 @@ static void print_usage(void)
     printf("  encrypts an already compressed P12 stream; -comp -encrypt compresses\n");
     printf("  plain data before encryption.  P3/P4/P5 -comp uses retail P345 compression;\n");
     printf("  append -flashme after -comp to reproduce FlashMe's CTurt/CFW-Suite P345 rule.\n");
-    printf("  P3/P4/P5 effective streams are zero-padded through the next 8-byte boundary\n");
-    printf("  while assembling the image; that padding is not part of an exported component.\n");
+    printf("  P3/P5 effective streams are zero-padded through the next 8-byte boundary;\n");
+    printf("  FlashMe P4 is zero-padded to a 16-byte boundary relative to its own start.\n");
+    printf("  This physical-layout padding is not part of an exported component.\n");
     printf("  In -c, --offset pins P1--P5, -fh, -fp1, or -fp2 at a physical ROM byte\n");
     printf("  address.  P/FP starts must meet their header alignment.  The packed\n");
     printf("  (compressed/encrypted) size is used for overlap checks and header offsets\n");
@@ -1859,59 +1863,97 @@ static int max_reserved_end(const u32 *offsets, const u32 *reserved_sizes, int c
     return 0;
 }
 
-/* P3/P4/P5 store their effective bitstream size, not their trailing address
-   alignment bytes.  Keep those bytes out of exported component files, then
-   synthesize zeroes through the next 8-byte boundary while assembling the
-   image.  The boundary must never overwrite a following component or the
-   FlashMe secondary header or protected settings tail.  P1/P2 are different: their encryption layer owns
-   the corresponding 8-byte padding. */
-static int write_p345_alignment_padding(Blob *output, const u32 primary_offsets[5],
-                                        const Blob primary_parts[5],
-                                        const u32 flash_offsets[2], int has_flashme,
-                                        u32 flash_header_offset,
-                                        u32 protected_tail_offset)
+/* P3/P4/P5 and FlashMe FP1/FP2 store effective, unencrypted stream sizes, not
+   their trailing address-alignment bytes.  Keep those bytes out of exported
+   component files, then synthesize the physical zeroes while assembling the
+   image.  P3/P5 and FP1/FP2 end on an 8-byte boundary.  FlashMe's P4 reserves
+   a 16-byte slot boundary relative to its own start, as demonstrated by the Lite streams whose
+   0x8E01-byte P4 effective data is followed by fifteen zero bytes; normal
+   firmware P4 remains on the ordinary 8-byte boundary.  The boundary must
+   never overwrite a following component, FlashMe secondary header, or
+   protected settings tail.  Primary P1/P2 are different: their encryption
+   layer owns the corresponding padding. */
+static int write_effective_stream_alignment_padding(Blob *output, u32 offset, size_t size,
+                                                     u32 alignment, const char *name,
+                                                     const u32 primary_offsets[5],
+                                                     const u32 flash_offsets[2], int has_flashme,
+                                                     u32 flash_header_offset,
+                                                     u32 protected_tail_offset)
+{
+    u32 end;
+    u32 padded_size;
+    u32 padded_end;
+    u32 next_start = UINT_MAX;
+    int j;
+
+    if (size > UINT_MAX - offset) {
+        print_error("%s alignment padding exceeds the firmware address space", name);
+        return -1;
+    }
+    end = offset + (u32)size;
+    if (round_up_u32((u32)size, alignment, &padded_size) != 0 ||
+        padded_size > UINT_MAX - offset) {
+        print_error("%s alignment padding cannot be calculated", name);
+        return -1;
+    }
+    padded_end = offset + padded_size;
+    for (j = 0; j < 5; j++) {
+        if (primary_offsets[j] > end && primary_offsets[j] < next_start) {
+            next_start = primary_offsets[j];
+        }
+    }
+    if (has_flashme) {
+        for (j = 0; j < 2; j++) {
+            if (flash_offsets[j] > end && flash_offsets[j] < next_start) {
+                next_start = flash_offsets[j];
+            }
+        }
+        if (flash_header_offset > end && flash_header_offset < next_start) {
+            next_start = flash_header_offset;
+        }
+    }
+    if (protected_tail_offset > end && protected_tail_offset < next_start) {
+        next_start = protected_tail_offset;
+    }
+    if (next_start != UINT_MAX && padded_end > next_start) padded_end = next_start;
+    if (padded_end > output->size) {
+        print_error("%s alignment padding does not fit in the output image", name);
+        return -1;
+    }
+    if (padded_end > end) memset(output->data + end, 0, padded_end - end);
+    return 0;
+}
+
+static int write_all_effective_stream_alignment_padding(Blob *output,
+                                                         const u32 primary_offsets[5],
+                                                         const Blob primary_parts[5],
+                                                         const u32 flash_offsets[2],
+                                                         const Blob flash_parts[2], int has_flashme,
+                                                         u32 flash_header_offset,
+                                                         u32 protected_tail_offset)
 {
     int i;
 
     for (i = 2; i < 5; i++) {
-        u32 end;
-        u32 padded_end;
-        u32 next_start = UINT_MAX;
-        int j;
-
-        if (primary_parts[i].size > UINT_MAX - primary_offsets[i]) {
-            print_error("P%d alignment padding exceeds the firmware address space", i + 1);
-            return -1;
+        char name[4];
+        snprintf(name, sizeof(name), "P%d", i + 1);
+        u32 alignment = has_flashme && i == 3 ? 16u : 8u;
+        if (write_effective_stream_alignment_padding(output, primary_offsets[i],
+                                                     primary_parts[i].size, alignment, name,
+                                                     primary_offsets, flash_offsets, has_flashme,
+                                                     flash_header_offset,
+                                                     protected_tail_offset) != 0) return -1;
+    }
+    if (has_flashme) {
+        for (i = 0; i < 2; i++) {
+            char name[5];
+            snprintf(name, sizeof(name), "FP%d", i + 1);
+            if (write_effective_stream_alignment_padding(output, flash_offsets[i],
+                                                         flash_parts[i].size, 8u, name,
+                                                         primary_offsets, flash_offsets, has_flashme,
+                                                         flash_header_offset,
+                                                         protected_tail_offset) != 0) return -1;
         }
-        end = primary_offsets[i] + (u32)primary_parts[i].size;
-        if (round_up_u32(end, 8, &padded_end) != 0) {
-            print_error("P%d alignment padding cannot be calculated", i + 1);
-            return -1;
-        }
-        for (j = 0; j < 5; j++) {
-            if (j != i && primary_offsets[j] > end && primary_offsets[j] < next_start) {
-                next_start = primary_offsets[j];
-            }
-        }
-        if (has_flashme) {
-            for (j = 0; j < 2; j++) {
-                if (flash_offsets[j] > end && flash_offsets[j] < next_start) {
-                    next_start = flash_offsets[j];
-                }
-            }
-            if (flash_header_offset > end && flash_header_offset < next_start) {
-                next_start = flash_header_offset;
-            }
-        }
-        if (protected_tail_offset > end && protected_tail_offset < next_start) {
-            next_start = protected_tail_offset;
-        }
-        if (next_start != UINT_MAX && padded_end > next_start) padded_end = next_start;
-        if (padded_end > output->size) {
-            print_error("P%d alignment padding does not fit in the output image", i + 1);
-            return -1;
-        }
-        if (padded_end > end) memset(output->data + end, 0, padded_end - end);
     }
     return 0;
 }
@@ -2086,7 +2128,8 @@ cleanup:
 }
 
 static int prepare_component_for_create(int component, const ExplicitComponent *request,
-                                        const FW_HEADER *primary_header, Blob *output)
+                                        const FW_HEADER *primary_header,
+                                        int flashme_zero_padding, Blob *output)
 {
     Blob source;
     Blob transformed;
@@ -2114,7 +2157,8 @@ static int prepare_component_for_create(int component, const ExplicitComponent *
             print_error("%s cannot be encrypted", explicit_component_name(component));
             goto cleanup;
         }
-        if (encrypt_p12(primary_header, &source, &transformed) != 0) goto cleanup;
+        if (encrypt_p12(primary_header, &source, &transformed,
+                        flashme_zero_padding) != 0) goto cleanup;
         blob_free(&source);
         source = transformed;
         blob_init(&transformed);
@@ -2175,6 +2219,7 @@ static int command_explicit_create(int argc, char **argv)
     u32 protected_tail_size = 0;
     u32 requested_size = 0;
     u16 target_user_settings_offset = 0;
+    u16 flashme_source_part34_crc16 = 0;
     int automatic_size = 1;
     int has_flashme;
     int flash_header_has_override = 0;
@@ -2197,6 +2242,7 @@ static int command_explicit_create(int argc, char **argv)
     output_path = argv[2];
     if (parse_explicit_firmware_request(argc, argv, 3, 1, &request) != 0 ||
         validate_explicit_firmware_request(&request, 1) != 0) goto cleanup;
+    has_flashme = request.components[FWCOMP_FLASH_HEADER].path != NULL;
     if (request.base_path != NULL &&
         (read_file(request.base_path, &base) != 0 ||
          get_base_settings_tail(&base, &base_settings_tail_offset, &base_settings_tail_size) != 0)) {
@@ -2205,18 +2251,18 @@ static int command_explicit_create(int argc, char **argv)
     if (read_header_file(request.components[FWCOMP_HEADER].path, &header) != 0 ||
         apply_header_edits(&header, &request.edits) != 0) goto cleanup;
     primary_header = (FW_HEADER *)header.data;
+    flashme_source_part34_crc16 = primary_header->part34_crc16;
 
     for (i = 0; i < 5; i++) {
         int component = FWCOMP_P1 + i;
         if (prepare_component_for_create(component, &request.components[component], primary_header,
-                                         &primary_parts[i]) != 0 ||
+                                         has_flashme, &primary_parts[i]) != 0 ||
             component_span(&primary_parts[i], &primary_reserved_sizes[i]) != 0) goto cleanup;
         primary_original_offsets[i] = primary_part_offset(primary_header, i);
         primary_alignments[i] = primary_part_alignment(primary_header, i);
         primary_has_override[i] = request.components[component].has_offset;
         primary_override_offsets[i] = request.components[component].offset;
     }
-    has_flashme = request.components[FWCOMP_FLASH_HEADER].path != NULL;
     if (has_flashme) {
         flash_header_has_override = request.components[FWCOMP_FLASH_HEADER].has_offset;
         if (read_header_file(request.components[FWCOMP_FLASH_HEADER].path, &flash_header) != 0 ||
@@ -2225,7 +2271,7 @@ static int command_explicit_create(int argc, char **argv)
         for (i = 0; i < 2; i++) {
             int component = FWCOMP_FLASH_P1 + i;
             if (prepare_component_for_create(component, &request.components[component], primary_header,
-                                             &flash_parts[i]) != 0 ||
+                                             0, &flash_parts[i]) != 0 ||
                 component_span(&flash_parts[i], &flash_reserved_sizes[i]) != 0) goto cleanup;
             flash_original_offsets[i] = flashme_part_offset(secondary_header, i);
             flash_alignments[i] = flashme_part_alignment(secondary_header, i);
@@ -2368,6 +2414,13 @@ static int command_explicit_create(int argc, char **argv)
         goto cleanup;
     }
     if (has_flashme) {
+        /* Historical FlashMe templates update the P1/P2 CRC for their small
+           replacement bootstrap, but leave the P3/P4 CRC at the base retail
+           header value: V3's value for Phat templates and V6's for Lite ones.
+           P3 contains the verification bypass, so retaining this field is
+           required for byte-identical FlashMe output; P5 remains calculated
+           normally. */
+        primary_header->part34_crc16 = flashme_source_part34_crc16;
         if (sync_flashme_header_from_primary(&header, &flash_header) != 0) goto cleanup;
         secondary_header = (FW_HEADER *)flash_header.data;
         if (set_flashme_component_offsets(secondary_header, flash_new_offsets) != 0) goto cleanup;
@@ -2393,9 +2446,10 @@ static int command_explicit_create(int argc, char **argv)
             memcpy(output.data + flash_new_offsets[i], flash_parts[i].data, flash_parts[i].size);
         }
     }
-    if (write_p345_alignment_padding(&output, primary_new_offsets, primary_parts,
-                                     flash_new_offsets, has_flashme, flash_header_offset,
-                                     protected_tail_offset) != 0) goto cleanup;
+    if (write_all_effective_stream_alignment_padding(&output, primary_new_offsets, primary_parts,
+                                                     flash_new_offsets, flash_parts, has_flashme,
+                                                     flash_header_offset,
+                                                     protected_tail_offset) != 0) goto cleanup;
     if (request.base_path != NULL && !has_flashme) {
         memcpy(output.data + base_copy_target_offset,
                base.data + base_copy_source_offset, base_copy_size);
@@ -2593,7 +2647,7 @@ static int command_explicit_stream(int argc, char **argv)
     if (request.encrypt) {
         Blob encrypted;
         blob_init(&encrypted);
-        if (encrypt_p12(key_header, current, &encrypted) != 0) {
+        if (encrypt_p12(key_header, current, &encrypted, 0) != 0) {
             blob_free(&encrypted);
             goto cleanup;
         }

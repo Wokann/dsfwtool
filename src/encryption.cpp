@@ -91,8 +91,8 @@ void init_keycode (u32 idcode, u32 level, u32 modulo) {
 }
 
 
-/* KEY1 transforms complete 64-bit blocks.  Padding belongs to encrypt_buffer(),
-   before the block transform; decrypt_buffer() rejects truncated blocks. */
+/* KEY1 transforms complete 64-bit blocks.  Padding belongs to the encryption
+   wrapper before the block transform; decrypt_buffer() rejects truncated blocks. */
 int decrypt_buffer(const u8* src, u8* dest, int src_size) {
     u8 block[8];
 
@@ -105,7 +105,8 @@ int decrypt_buffer(const u8* src, u8* dest, int src_size) {
 	return src_size;
 }
 
-int encrypt_buffer(const u8* src, u8* dest, int src_size) {
+static int encrypt_buffer_impl(const u8* src, u8* dest, int src_size,
+                               int use_retail_key1_tail) {
     int total;
     u32 block[2];
 
@@ -116,7 +117,7 @@ int encrypt_buffer(const u8* src, u8* dest, int src_size) {
         if (bytes > 8) bytes = 8;
         memset(block, 0, sizeof(block));
         if (bytes > 0) memcpy(block, src + i, (size_t)bytes);
-        if (bytes <= 4) {
+        if (use_retail_key1_tail && bytes > 0 && bytes <= 4) {
             u32 tail[2];
             /* Complete the first word with zeros, then supply the official
                ID-derived second word.  Transform a copy of the completed
@@ -129,4 +130,12 @@ int encrypt_buffer(const u8* src, u8* dest, int src_size) {
         memcpy(dest + i, block, sizeof(block));
     }
 	return total;
+}
+
+int encrypt_buffer(const u8* src, u8* dest, int src_size) {
+    return encrypt_buffer_impl(src, dest, src_size, 1);
+}
+
+int encrypt_buffer_zero_padded(const u8* src, u8* dest, int src_size) {
+    return encrypt_buffer_impl(src, dest, src_size, 0);
 }
