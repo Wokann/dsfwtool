@@ -405,34 +405,6 @@ static void sort_indices_by_offset(const u32 *offsets, int count, int *indices)
     }
 }
 
-/* A FlashMe patch derives both headers from an official header, whose ROM
-   locations describe the source image rather than the new combined layout.
-   Unless a component has an explicit --offset, use deterministic ordering
-   hints and let the relocation pass assign its final aligned location. */
-static int flashme_has_automatic_component_offsets(const int *has_override,
-                                                   int count)
-{
-    int i;
-    for (i = 0; i < count; i++) {
-        if (has_override == NULL || !has_override[i]) return 1;
-    }
-    return 0;
-}
-
-static void seed_automatic_layout_offsets(u32 *offsets, const int *has_override,
-                                          const int *physical_order, int count)
-{
-    int rank;
-    for (rank = 0; rank < count; rank++) {
-        int index = physical_order[rank];
-        if (has_override == NULL || !has_override[index]) {
-            /* These are ordering hints only.  The relocation pass below applies
-               each component's actual alignment and packed size. */
-            offsets[index] = HEADER_BYTES + (u32)rank;
-        }
-    }
-}
-
 static int calculate_spans(const u32 *offsets, int count, u32 image_limit, u32 *spans)
 {
     int indices[5];
@@ -1342,7 +1314,6 @@ static int build_flashme_combined_positions(const u32 primary_original_offsets[5
     u32 override_offsets[MAX_RELOCATED_COMPONENTS];
     int has_override[MAX_RELOCATED_COMPONENTS];
     u32 new_offsets[MAX_RELOCATED_COMPONENTS];
-    static const int physical_order[MAX_RELOCATED_COMPONENTS] = {0, 1, 4, 3, 2, 5, 6};
     int i;
 
     for (i = 0; i < 5; i++) {
@@ -1358,12 +1329,6 @@ static int build_flashme_combined_positions(const u32 primary_original_offsets[5
         sizes[5 + i] = flash_sizes[i];
         has_override[5 + i] = flash_has_override[i];
         override_offsets[5 + i] = flash_override_offsets[i];
-    }
-    if (flashme_has_automatic_component_offsets(has_override,
-                                                MAX_RELOCATED_COMPONENTS)) {
-        seed_automatic_layout_offsets(original_offsets, has_override, physical_order,
-                                      MAX_RELOCATED_COMPONENTS);
-        printf("Using automatic FlashMe component layout for components without --offset.\n");
     }
     if (build_relocated_positions_with_overrides(original_offsets, alignments, sizes,
                                                  has_override, override_offsets,
@@ -1466,7 +1431,7 @@ static void print_usage(void)
     printf("      -p5 [-comp [-flashme]] [--offset OFFSET] FILE\n");
     printf("      [-fh [--offset OFFSET] FLASH_HEADER.bin\n");
     printf("       -fp1 [-comp [-tvout]] [--offset OFFSET] FILE -fp2 [-comp [-tvout]] [--offset OFFSET] FILE]\n");
-    printf("      [-b BASE.bin] [--no-stream-padding] [-s 256K|512K|1M|auto] [--fill 00|FF]\n");
+    printf("      [--layout LAYOUT.ld] [-b BASE.bin] [--no-stream-padding] [-s 256K|512K|1M|auto] [--fill 00|FF]\n");
     printf("  P1/P2 with no modifier are already encrypted P12 streams.  -encrypt\n");
     printf("  encrypts an already compressed P12 stream; -comp -encrypt compresses\n");
     printf("  plain data before encryption.  Append -tvout to P12 -comp to use the V8a\n");
@@ -1479,6 +1444,10 @@ static void print_usage(void)
     printf("  address.  P/FP starts must meet their header alignment.  The packed\n");
     printf("  (compressed/encrypted) size is used for overlap checks and header offsets\n");
     printf("  are rewritten automatically.  The primary header occupies 0x000000--0x00017F.\n");
+    printf("  --layout reads a FlashMe layout script: H uses 'fixed START-END'; FH uses\n");
+    printf("  'auto START-END' or 'fixed START-END' (the end is a readable annotation).\n");
+    printf("  P1/P2/P3/P4/P5/FP1/FP2 are listed in placement order with 'auto',\n");
+    printf("  optional 'auto align N' for end-of-slot padding, or 'fixed OFFSET'.\n");
     printf("  Normal firmware reserves its final 0x600 bytes; FlashMe reserves only its\n");
     printf("  secondary 0x180-byte header and final 0x200 user-settings bytes.\n");
     printf("  Without -fh --offset, FlashMe uses capacity minus 0x980 (0x3F680 at 256 KiB,\n");
@@ -1553,11 +1522,35 @@ typedef struct {
 typedef struct {
     ExplicitComponent components[FWCOMP_COUNT];
     const char *base_path;
+    const char *layout_path;
     const char *size_text;
     u8 fill_byte;
     int no_stream_padding;
     HeaderEdits edits;
 } ExplicitFirmwareRequest;
+
+enum {
+    FLASH_LAYOUT_P1 = 0,
+    FLASH_LAYOUT_P2,
+    FLASH_LAYOUT_P3,
+    FLASH_LAYOUT_P4,
+    FLASH_LAYOUT_P5,
+    FLASH_LAYOUT_FP1,
+    FLASH_LAYOUT_FP2,
+    FLASH_LAYOUT_COMPONENT_COUNT,
+    FLASH_LAYOUT_FH,
+    FLASH_LAYOUT_H,
+    FLASH_LAYOUT_COUNT
+};
+
+typedef struct {
+    int fixed[FLASH_LAYOUT_COUNT];
+    u32 offsets[FLASH_LAYOUT_COUNT];
+    /* Optional end-of-slot alignment for an automatically placed component. */
+    u32 slot_alignments[FLASH_LAYOUT_COMPONENT_COUNT];
+    int order[FLASH_LAYOUT_COMPONENT_COUNT];
+    int order_index[FLASH_LAYOUT_COMPONENT_COUNT];
+} FlashMeLayoutScript;
 
 typedef struct {
     int component;
@@ -1782,6 +1775,14 @@ static int parse_explicit_firmware_request(int argc, char **argv, int first_opti
                 parse_fill_byte(value, &request->fill_byte) != 0) return -1;
             continue;
         }
+        if (create && strcmp(argv[i], "--layout") == 0) {
+            if (request->layout_path != NULL) {
+                print_error("--layout is specified more than once");
+                return -1;
+            }
+            if (take_option_value(argc, argv, &i, "--layout", &request->layout_path) != 0) return -1;
+            continue;
+        }
         if (create && strcmp(argv[i], "--no-stream-padding") == 0) {
             request->no_stream_padding = 1;
             continue;
@@ -1849,6 +1850,10 @@ static int validate_explicit_firmware_request(const ExplicitFirmwareRequest *req
     flashme_any = request->components[FWCOMP_FLASH_HEADER].path != NULL ||
                    request->components[FWCOMP_FLASH_P1].path != NULL ||
                    request->components[FWCOMP_FLASH_P2].path != NULL;
+    if (request->layout_path != NULL && !flashme_any) {
+        print_error("--layout is valid only when creating a complete FlashMe image");
+        return -1;
+    }
     if (request->base_path == NULL && flashme_any &&
         (request->components[FWCOMP_FLASH_HEADER].path == NULL ||
                         request->components[FWCOMP_FLASH_P1].path == NULL ||
@@ -1955,6 +1960,126 @@ static int write_effective_stream_alignment_padding(Blob *output, u32 offset, si
         return -1;
     }
     if (padded_end > end) memset(output->data + end, 0, padded_end - end);
+    return 0;
+}
+
+static int flashme_layout_name(const char *name)
+{
+    if (strcmp(name, "P1") == 0) return FLASH_LAYOUT_P1;
+    if (strcmp(name, "P2") == 0) return FLASH_LAYOUT_P2;
+    if (strcmp(name, "P3") == 0) return FLASH_LAYOUT_P3;
+    if (strcmp(name, "P4") == 0) return FLASH_LAYOUT_P4;
+    if (strcmp(name, "P5") == 0) return FLASH_LAYOUT_P5;
+    if (strcmp(name, "FP1") == 0) return FLASH_LAYOUT_FP1;
+    if (strcmp(name, "FP2") == 0) return FLASH_LAYOUT_FP2;
+    if (strcmp(name, "FH") == 0) return FLASH_LAYOUT_FH;
+    if (strcmp(name, "H") == 0) return FLASH_LAYOUT_H;
+    return -1;
+}
+
+static int parse_layout_range(const char *text, u32 *start, u32 *end)
+{
+    char value[64];
+    char *separator;
+    if (strlen(text) >= sizeof(value)) return -1;
+    strcpy(value, text);
+    separator = strchr(value, '-');
+    if (separator == NULL || separator == value || separator[1] == '\0') return -1;
+    *separator = '\0';
+    return parse_u32(value, start) == 0 && parse_u32(separator + 1, end) == 0 && *end >= *start ? 0 : -1;
+}
+
+static int parse_flashme_layout_script(const char *path, FlashMeLayoutScript *script)
+{
+    FILE *file;
+    char line[256];
+    int seen[FLASH_LAYOUT_COUNT];
+    int order_count = 0;
+    int line_number = 0;
+
+    memset(script, 0, sizeof(*script));
+    memset(seen, 0, sizeof(seen));
+    file = fopen(path, "rb");
+    if (file == NULL) {
+        print_error("cannot open layout script '%s'", path);
+        return -1;
+    }
+    while (fgets(line, sizeof(line), file) != NULL) {
+        char name[16];
+        char mode[16];
+        char value[32];
+        char extra[16];
+        char *comment = strpbrk(line, "#;");
+        int fields;
+        int component;
+        line_number++;
+        if (comment != NULL) *comment = '\0';
+        fields = sscanf(line, " %15s %15s %31s %15s", name, mode, value, extra);
+        if (fields == EOF || fields == 0) continue;
+        component = flashme_layout_name(name);
+        if (component < 0 || seen[component]) {
+            print_error("invalid or duplicate layout entry at %s:%d", path, line_number);
+            fclose(file);
+            return -1;
+        }
+        if (component == FLASH_LAYOUT_H) {
+            u32 range_end;
+            if (strcmp(mode, "fixed") != 0 || fields != 3 ||
+                parse_layout_range(value, &script->offsets[component], &range_end) != 0 ||
+                script->offsets[component] != 0) {
+                print_error("%s:%d: H must use fixed 0x000000-END", path, line_number);
+                fclose(file);
+                return -1;
+            }
+            script->fixed[component] = 1;
+        } else if (component == FLASH_LAYOUT_FH) {
+            u32 range_start;
+            u32 range_end;
+            if (fields != 3 || parse_layout_range(value, &range_start, &range_end) != 0 ||
+                (strcmp(mode, "auto") != 0 && strcmp(mode, "fixed") != 0)) {
+                print_error("%s:%d: FH must use auto START-END or fixed START-END", path, line_number);
+                fclose(file);
+                return -1;
+            }
+            if (strcmp(mode, "fixed") == 0) {
+                script->fixed[component] = 1;
+                script->offsets[component] = range_start;
+            }
+        } else if (strcmp(mode, "auto") == 0) {
+            if (fields == 2) {
+                /* The component's normal stored length is its slot size. */
+            } else if (component < FLASH_LAYOUT_COMPONENT_COUNT && fields == 4 &&
+                       strcmp(value, "align") == 0 &&
+                       parse_u32(extra, &script->slot_alignments[component]) == 0 &&
+                       script->slot_alignments[component] != 0) {
+                /* `auto align N` reserves this component's physical slot through
+                   the next N-byte boundary without fixing its start address. */
+            } else {
+                print_error("%s:%d: 'auto' accepts optional 'align N'", path, line_number);
+                fclose(file);
+                return -1;
+            }
+        } else if (strcmp(mode, "fixed") == 0) {
+            if (fields != 3 || parse_u32(value, &script->offsets[component]) != 0) {
+                print_error("%s:%d: 'fixed' requires one valid address", path, line_number);
+                fclose(file);
+                return -1;
+            }
+            script->fixed[component] = 1;
+        } else {
+            print_error("%s:%d: placement must be 'auto' or 'fixed'", path, line_number);
+            fclose(file);
+            return -1;
+        }
+        seen[component] = 1;
+        if (component < FLASH_LAYOUT_COMPONENT_COUNT) script->order[order_count++] = component;
+    }
+    fclose(file);
+    if (order_count != FLASH_LAYOUT_COMPONENT_COUNT || !seen[FLASH_LAYOUT_FH] || !seen[FLASH_LAYOUT_H]) {
+        print_error("layout script '%s' must list H, P1, P2, P3, P4, P5, FP1, FP2, and FH exactly once", path);
+        return -1;
+    }
+    for (int i = 0; i < order_count; i++) script->order_index[script->order[i]] = i;
     return 0;
 }
 
@@ -2224,6 +2349,7 @@ static int command_explicit_create(int argc, char **argv)
     Blob primary_parts[5];
     Blob flash_parts[2];
     Blob output;
+    FlashMeLayoutScript layout_script;
     FW_HEADER *primary_header;
     FW_HEADER *secondary_header;
     u32 primary_original_offsets[5];
@@ -2259,6 +2385,7 @@ static int command_explicit_create(int argc, char **argv)
     int automatic_size = 1;
     int base_has_layout = 0;
     int has_flashme;
+    int has_layout_script = 0;
     int flash_header_has_override = 0;
     FirmwareRange ranges[MAX_RANGES];
     int range_count = 0;
@@ -2268,6 +2395,7 @@ static int command_explicit_create(int argc, char **argv)
     blob_init(&header);
     blob_init(&flash_header);
     blob_init(&base);
+    memset(&layout_script, 0, sizeof(layout_script));
     memset(&base_layout, 0, sizeof(base_layout));
     blob_init(&output);
     for (i = 0; i < 5; i++) blob_init(&primary_parts[i]);
@@ -2291,6 +2419,32 @@ static int command_explicit_create(int argc, char **argv)
                   request.components[FWCOMP_FLASH_P1].path != NULL ||
                   request.components[FWCOMP_FLASH_P2].path != NULL ||
                   (base_has_layout && base_layout.has_flashme);
+    if (request.layout_path != NULL) {
+        if (!has_flashme || parse_flashme_layout_script(request.layout_path, &layout_script) != 0) goto cleanup;
+        has_layout_script = 1;
+        for (i = 0; i < FLASH_LAYOUT_COMPONENT_COUNT; i++) {
+            int component = i < 5 ? FWCOMP_P1 + i : FWCOMP_FLASH_P1 + (i - 5);
+            if (!layout_script.fixed[i]) continue;
+            if (request.components[component].has_offset &&
+                request.components[component].offset != layout_script.offsets[i]) {
+                print_error("%s has conflicting --offset and layout-script addresses",
+                            explicit_component_name(component));
+                goto cleanup;
+            }
+            request.components[component].has_offset = 1;
+            request.components[component].offset = layout_script.offsets[i];
+        }
+        if (layout_script.fixed[FLASH_LAYOUT_FH]) {
+            if (request.components[FWCOMP_FLASH_HEADER].has_offset &&
+                request.components[FWCOMP_FLASH_HEADER].offset !=
+                    layout_script.offsets[FLASH_LAYOUT_FH]) {
+                print_error("FlashMe header has conflicting --offset and layout-script addresses");
+                goto cleanup;
+            }
+            request.components[FWCOMP_FLASH_HEADER].has_offset = 1;
+            request.components[FWCOMP_FLASH_HEADER].offset = layout_script.offsets[FLASH_LAYOUT_FH];
+        }
+    }
     if (request.components[FWCOMP_HEADER].path != NULL) {
         if (read_header_file(request.components[FWCOMP_HEADER].path, &header) != 0) goto cleanup;
     } else if (base_has_layout) {
@@ -2303,7 +2457,7 @@ static int command_explicit_create(int argc, char **argv)
     primary_header = (FW_HEADER *)header.data;
     flashme_source_part34_crc16 = primary_header->part34_crc16;
 
-    if (base_has_layout) {
+    if (base_has_layout && !has_layout_script) {
         for (i = 0; i < 5; i++) {
             if (!request.components[FWCOMP_P1 + i].has_offset) {
                 request.components[FWCOMP_P1 + i].has_offset = 1;
@@ -2334,7 +2488,13 @@ static int command_explicit_create(int argc, char **argv)
               blob_copy_data(&primary_parts[i], base.data + base_layout.offsets[i],
                              i < 2 ? base_layout.spans[i] :
                                      base_layout.effective_sizes[i]) != 0)) ||
-            component_span(&primary_parts[i], &primary_reserved_sizes[i]) != 0) goto cleanup;
+             component_span(&primary_parts[i], &primary_reserved_sizes[i]) != 0) goto cleanup;
+        if (has_layout_script && layout_script.slot_alignments[i] != 0 &&
+            round_up_u32(primary_reserved_sizes[i], layout_script.slot_alignments[i],
+                         &primary_reserved_sizes[i]) != 0) {
+            print_error("%s layout slot cannot be aligned", explicit_component_name(component));
+            goto cleanup;
+        }
         primary_original_offsets[i] = primary_part_offset(primary_header, i);
         primary_alignments[i] = primary_part_alignment(primary_header, i);
         primary_has_override[i] = request.components[component].has_offset;
@@ -2363,10 +2523,33 @@ static int command_explicit_create(int argc, char **argv)
                   blob_copy_data(&flash_parts[i], base.data + base_layout.flashme_offsets[i],
                                  base_layout.flashme_effective_sizes[i]) != 0)) ||
                 component_span(&flash_parts[i], &flash_reserved_sizes[i]) != 0) goto cleanup;
+            if (has_layout_script &&
+                layout_script.slot_alignments[FLASH_LAYOUT_FP1 + i] != 0 &&
+                round_up_u32(flash_reserved_sizes[i],
+                             layout_script.slot_alignments[FLASH_LAYOUT_FP1 + i],
+                             &flash_reserved_sizes[i]) != 0) {
+                print_error("%s layout slot cannot be aligned", explicit_component_name(component));
+                goto cleanup;
+            }
             flash_original_offsets[i] = flashme_part_offset(secondary_header, i);
             flash_alignments[i] = flashme_part_alignment(secondary_header, i);
             flash_has_override[i] = request.components[component].has_offset;
             flash_override_offsets[i] = request.components[component].offset;
+        }
+        if (has_layout_script) {
+            for (i = 0; i < 5; i++) {
+                if (!primary_has_override[i]) {
+                    primary_original_offsets[i] = HEADER_BYTES +
+                                                  (u32)layout_script.order_index[i];
+                }
+            }
+            for (i = 0; i < 2; i++) {
+                int layout_component = FLASH_LAYOUT_FP1 + i;
+                if (!flash_has_override[i]) {
+                    flash_original_offsets[i] = HEADER_BYTES +
+                                                (u32)layout_script.order_index[layout_component];
+                }
+            }
         }
         if (build_flashme_combined_positions(primary_original_offsets, primary_alignments,
                                              primary_reserved_sizes, primary_has_override,

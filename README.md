@@ -68,8 +68,10 @@ capacity minus 0x980: `0x3F680` for 256 KiB and `0x7F680` for 512 KiB. Its FP1
 and FP2 components are unencrypted P12 streams. The seven components can be
 interleaved in physical ROM order, so the builder relocates them as one ordered
 set and writes their resulting starts back to the primary and FlashMe headers
-separately. When a component has no `--offset`, a deterministic FlashMe order
-is used and the transformed size and header alignment determine its address.
+separately. A FlashMe build may pass `--layout LAYOUT.ld` to define the listed
+order and select `auto` or a fixed start for every movable component. `auto`
+uses each transformed size and the owning header's alignment; the tool does
+not impose a component-class ordering of its own.
 A component-local `--offset` can pin any component, or the secondary header
 itself, to a chosen physical address.
 
@@ -101,6 +103,7 @@ dsfwtool -c OUTPUT.bin -h HEADER.bin
   -p5 [-comp [-flashme]] [--offset OFFSET] FILE
   [-fh [--offset OFFSET] FLASH_HEADER.bin
    -fp1 [-comp [-tvout]] [--offset OFFSET] FILE -fp2 [-comp [-tvout]] [--offset OFFSET] FILE]
+  [--layout LAYOUT.ld]
   [-b BASE.bin] [--no-stream-padding] [-s 256K|512K|1M|auto] [--fill 00|FF]
   [header-edit options]
 
@@ -116,8 +119,8 @@ provides the key material.
 
 Without `-b`, `-c` requires `-h` and all of P1 through P5. If any FlashMe
 artifact is supplied without `-b`, `-fh`, `-fp1`, and `-fp2` must all be
-supplied. With `-b`, `-h` and any component may be omitted: the base header
-or component is retained unless a replacement is supplied. P1/P2 with no
+supplied. With `-b`, `-h` must not be supplied and any component may be
+omitted: the base header or component is retained unless a replacement is supplied. P1/P2 with no
 modifier are already encrypted P12 streams. `-encrypt` accepts an
 already-compressed, unencrypted P12 stream; `-comp -encrypt` accepts plaintext
 and performs both stages. P3/P4/P5 use `-comp` for plaintext: by default it
@@ -128,6 +131,13 @@ alias of `-encrypt` for an independent P1/P2 operation. `-tvout` is accepted
 only immediately after P12 `-comp`; it selects the LZ-CUE, VRAM-safe matching
 rule observed in the FlashMe V8a TV-out FP2 stream. It leaves the default P12
 encoder unchanged.
+
+`--layout` is for a complete FlashMe build. `H` is written as `H fixed START-END`.
+`FH` is `FH auto START-END` or `FH fixed START-END`; P1--P5 and FP1/FP2 are
+listed in physical placement order as `auto`, `auto align N`, or `fixed OFFSET`.
+`auto align N` preserves automatic start placement but rounds that component's
+physical slot through the next N-byte boundary. The end in an H/FH range is a
+human-readable annotation; dsfwtool uses only its start.
 
 In `-c`, `--offset OFFSET` is a physical ROM byte address placed after that
 component's transformation modifiers and before its file name. P1/P2/P3/P4/P5
@@ -161,11 +171,10 @@ divide-by-eight user-settings pointer can address this trailing layout through
 512 KiB; `-b` therefore rejects a larger target size.
 
 When `BASE.bin` and the requested output have the same capacity, `-b` also
-initializes the whole output from the base before writing the explicit header
-and components. Thus bytes not covered by an explicitly supplied component
-(including gaps left when a replacement stream is shorter) retain their base
-value. `-h` remains the sole source of the generated primary header; `-b` does
-not override it. `--no-stream-padding` suppresses dsfwtool's normal automatic
+initializes the whole output from the base before writing explicit components.
+Thus bytes not covered by an explicitly supplied component (including gaps left
+when a replacement stream is shorter) retain their base value. The primary
+header is always retained directly from the base. `--no-stream-padding` suppresses dsfwtool's normal automatic
 zero writes after effective component streams, preserving the corresponding
 base bytes as well. It is intended for an incremental patch layout, not for a
 fresh fill-based image.
@@ -233,7 +242,7 @@ To preserve a console's trailing Wi-Fi and user settings while changing the
 capacity, add a base firmware:
 
 ```text
-dsfwtool -c rebuilt-512.bin -b original.bin -s 512K -h unpack/header.bin \
+dsfwtool -c rebuilt-512.bin -b original.bin -s 512K \
   -p1 unpack/p1.encrypted -p2 unpack/p2.encrypted \
   -p3 unpack/p3.p345 -p4 unpack/p4.p345 -p5 unpack/p5.p345
 ```

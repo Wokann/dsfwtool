@@ -58,8 +58,9 @@ P3、P4、P5 直接使用 P345 双静态 Huffman 格式，不带加密层。
 FlashMe 固件默认在“逻辑容量减 0x980”的位置放置第二个 0x180 字节头，通过 `-fh`
 表示：256 KiB 时为 `0x3F680`，512 KiB 时为 `0x7F680`。它的 FP1、FP2 是未加密的
 P12 流。七个组件在物理 ROM 地址中可以交错排列，因此创建时会按统一的物理地址顺序
-重新安排它们，再把各自的新起始位置写回主头和 FlashMe 头。组件未指定 `--offset` 时，
-工具按确定性的 FlashMe 顺序排列，再以转换后的大小和头中对齐要求决定其地址。每个
+重新安排它们，再把各自的新起始位置写回主头和 FlashMe 头。FlashMe 构建可通过
+`--layout LAYOUT.ld` 写明可移动组件的排列顺序，以及每项采用 `auto` 或固定起点；
+`auto` 以转换后的大小与所属头中的对齐要求决定地址，工具本身不预设组件类别顺序。每个
 组件及次级头本身都可通过局部的 `--offset` 固定到指定物理地址。
 
 部分 FlashMe 转储缺少最后的 0x200 字节设置扇区，物理文件长度会是
@@ -89,6 +90,7 @@ dsfwtool -c OUTPUT.bin -h HEADER.bin
   -p5 [-comp [-flashme]] [--offset OFFSET] FILE
   [-fh [--offset OFFSET] FLASH_HEADER.bin
    -fp1 [-comp [-tvout]] [--offset OFFSET] FILE -fp2 [-comp [-tvout]] [--offset OFFSET] FILE]
+  [--layout LAYOUT.ld]
   [-b BASE.bin] [--no-stream-padding] [-s 256K|512K|1M|auto] [--fill 00|FF]
   [头部修改参数]
 
@@ -101,7 +103,7 @@ dsfwtool -p1|-p2|-p3|-p4|-p5|-fp1|-fp2
 或 P2，必须在同一条 `-x` 命令中输出 `-h`，因为头部提供密钥材料。
 
 未使用 `-b` 时，`-c` 始终需要 `-h` 与全部 P1 至 P5；未使用 `-b` 而指定任何
-FlashMe 文件时，也必须同时指定 `-fh`、`-fp1`、`-fp2`。使用 `-b` 时，`-h` 和
+FlashMe 文件时，也必须同时指定 `-fh`、`-fp1`、`-fp2`。使用 `-b` 时不得指定 `-h`，
 任意组件都可省略：未提供时保留基底头或基底组件。P1/P2 不带修饰词时输入的是已加密 P12 流；
 `-encrypt` 输入已压缩但未加密的 P12 流；`-comp -encrypt` 输入明文并连续压缩、
 加密。P3/P4/P5 用 `-comp` 输入明文：默认采用官方固件的 P345 编码器；
@@ -110,6 +112,12 @@ FlashMe 文件时，也必须同时指定 `-fh`、`-fp1`、`-fp2`。使用 `-b` 
 独立 P1/P2 操作中，`-crypt` 是 `-encrypt` 的同义写法。`-tvout` 只能紧跟在 P12
 的 `-comp` 后；它选择在 FlashMe V8a TV-out FP2 流中实测到的 LZ-CUE、VRAM 安全
 匹配规则，不改变默认 P12 编码器。
+
+`--layout` 用于完整的 FlashMe 构建。`H` 写作 `H fixed 起点-终点`；`FH` 可写作
+`FH auto 起点-终点` 或 `FH fixed 起点-终点`；P1--P5 与 FP1/FP2 按物理放置顺序逐行
+写作 `auto`、`auto align N` 或 `fixed 地址`。`auto align N` 不固定组件起点，
+但会将该组件的物理预留槽位补齐到下一个 N 字节边界。H/FH 范围的终点仅供人工核对，
+dsfwtool 实际只使用起点。
 
 在 `-c` 中，`--offset OFFSET` 表示物理 ROM 字节地址；它必须放在该组件的转换修饰词
 之后、文件名之前。P1/P2/P3/P4/P5 和 FP1/FP2 必须满足各自头中编码的起始对齐，`-fh`
@@ -133,8 +141,8 @@ FlashMe 文件时，也必须同时指定 `-fh`、`-fp1`、`-fp2`。使用 `-b` 
 更大的目标容量。
 
 当 `BASE.bin` 与目标输出容量相同时，`-b` 还会先以完整基底初始化输出，再写入明确
-提供的头和组件。因此未被明确组件覆盖的字节（包括替换流缩短后留下的间隔）都会保留
-基底值。`-h` 仍是生成主头的唯一来源，`-b` 不会覆盖它。`--no-stream-padding` 会禁止
+提供的组件。因此未被明确组件覆盖的字节（包括替换流缩短后留下的间隔）都会保留
+基底值。主头始终直接保留自基底。`--no-stream-padding` 会禁止
 dsfwtool 在有效组件流之后通常进行的自动补零，从而连这些尾字节也保持基底值。该选项
 面向增量补丁式布局，而非从填充值新建镜像。
 
@@ -217,7 +225,7 @@ dsfwtool -c rebuilt.bin -h unpack/header.bin \
 需要在改变容量时保留主机末尾的 Wi-Fi 与用户设置，可加入基础固件：
 
 ```text
-dsfwtool -c rebuilt-512.bin -b original.bin -s 512K -h unpack/header.bin \
+dsfwtool -c rebuilt-512.bin -b original.bin -s 512K \
   -p1 unpack/p1.encrypted -p2 unpack/p2.encrypted \
   -p3 unpack/p3.p345 -p4 unpack/p4.p345 -p5 unpack/p5.p345
 ```
