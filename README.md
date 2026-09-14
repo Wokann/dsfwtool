@@ -89,13 +89,13 @@ dsfwtool --version
 dsfwtool -i FIRMWARE.bin [-o REPORT.txt]
 
 dsfwtool -x FIRMWARE.bin
-  -h HEADER.bin
+  -h HEADER.bin [-rsa RSA_SIGNATURE.bin]
   -p1 [-decrypt [-uncomp]] FILE
   -p2 [-decrypt [-uncomp]] FILE
   -p3 [-uncomp] FILE  -p4 [-uncomp] FILE  -p5 [-uncomp] FILE
   [-fh FLASH_HEADER.bin -fp1 [-uncomp] FILE -fp2 [-uncomp] FILE]
 
-dsfwtool -c OUTPUT.bin -h HEADER.bin
+dsfwtool -c OUTPUT.bin -h HEADER.bin [-rsa RSA_SIGNATURE.bin]
   -p1 [-encrypt | -comp [-tvout] -encrypt] [--offset OFFSET] FILE
   -p2 [-encrypt | -comp [-tvout] -encrypt] [--offset OFFSET] FILE
   -p3 [-comp [-flashme]] [--offset OFFSET] FILE
@@ -132,12 +132,19 @@ only immediately after P12 `-comp`; it selects the LZ-CUE, VRAM-safe matching
 rule observed in the FlashMe V8a TV-out FP2 stream. It leaves the default P12
 encoder unchanged.
 
-`--layout` is for a complete FlashMe build. `H` is written as `H fixed START-END`.
+`--layout` supports both a complete FlashMe build and an official-firmware
+build. `H` is written as `H fixed START-END`.
 `FH` is `FH auto START-END` or `FH fixed START-END`; P1--P5 and FP1/FP2 are
 listed in physical placement order as `auto`, `auto align N`, or `fixed OFFSET`.
 `auto align N` preserves automatic start placement but rounds that component's
 physical slot through the next N-byte boundary. The end in an H/FH range is a
 human-readable annotation; dsfwtool uses only its start.
+
+For an official build, list `H` and P1--P5 in physical placement order; a
+fixed primary entry pins that component's retail offset. iQue/Korean layouts
+may additionally contain `RSA fixed 0x000200-0x00027F`. The explicit `-rsa`
+option exports/imports exactly those 0x80 physical bytes and is never inferred
+from a base image.
 
 In `-c`, `--offset OFFSET` is a physical ROM byte address placed after that
 component's transformation modifiers and before its file name. P1/P2/P3/P4/P5

@@ -76,13 +76,13 @@ dsfwtool --version
 dsfwtool -i FIRMWARE.bin [-o REPORT.txt]
 
 dsfwtool -x FIRMWARE.bin
-  -h HEADER.bin
+  -h HEADER.bin [-rsa RSA_SIGNATURE.bin]
   -p1 [-decrypt [-uncomp]] FILE
   -p2 [-decrypt [-uncomp]] FILE
   -p3 [-uncomp] FILE  -p4 [-uncomp] FILE  -p5 [-uncomp] FILE
   [-fh FLASH_HEADER.bin -fp1 [-uncomp] FILE -fp2 [-uncomp] FILE]
 
-dsfwtool -c OUTPUT.bin -h HEADER.bin
+dsfwtool -c OUTPUT.bin -h HEADER.bin [-rsa RSA_SIGNATURE.bin]
   -p1 [-encrypt | -comp [-tvout] -encrypt] [--offset OFFSET] FILE
   -p2 [-encrypt | -comp [-tvout] -encrypt] [--offset OFFSET] FILE
   -p3 [-comp [-flashme]] [--offset OFFSET] FILE
@@ -113,11 +113,15 @@ FlashMe 文件时，也必须同时指定 `-fh`、`-fp1`、`-fp2`。使用 `-b` 
 的 `-comp` 后；它选择在 FlashMe V8a TV-out FP2 流中实测到的 LZ-CUE、VRAM 安全
 匹配规则，不改变默认 P12 编码器。
 
-`--layout` 用于完整的 FlashMe 构建。`H` 写作 `H fixed 起点-终点`；`FH` 可写作
+`--layout` 同时支持完整的 FlashMe 构建与官方固件构建。`H` 写作
+`H fixed 起点-终点`；`FH` 可写作
 `FH auto 起点-终点` 或 `FH fixed 起点-终点`；P1--P5 与 FP1/FP2 按物理放置顺序逐行
 写作 `auto`、`auto align N` 或 `fixed 地址`。`auto align N` 不固定组件起点，
 但会将该组件的物理预留槽位补齐到下一个 N 字节边界。H/FH 范围的终点仅供人工核对，
-dsfwtool 实际只使用起点。
+dsfwtool 实际只使用起点。官方固件布局应按物理放置顺序列出 `H` 和 P1--P5，主组件的
+`fixed` 项可固定其零售镜像偏移。iQue/韩国布局还可写入
+`RSA fixed 0x000200-0x00027F`；显式 `-rsa` 会导出/导入这恰好 0x80 字节的物理签名，
+绝不会从基底镜像隐式取得。
 
 在 `-c` 中，`--offset OFFSET` 表示物理 ROM 字节地址；它必须放在该组件的转换修饰词
 之后、文件名之前。P1/P2/P3/P4/P5 和 FP1/FP2 必须满足各自头中编码的起始对齐，`-fh`

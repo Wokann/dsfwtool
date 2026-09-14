@@ -38,6 +38,9 @@ typedef struct {
 /* Full firmware header sector, exported header payload, and FlashMe trailer. */
 #define FW_HEADER_SIZE 0x200u
 #define FW_HEADER_DATA_SIZE 0x180u
+/* iQue/Korean retail images reserve this separate 0x80-byte RSA block before P1. */
+#define FW_RSA_SIGNATURE_OFFSET FW_HEADER_SIZE
+#define FW_RSA_SIGNATURE_SIZE 0x80u
 #define FW_CAPACITY_UNIT 0x40000u
 #define FW_FLASHME_TRAILER_SIZE 0x980u
 

@@ -1415,6 +1415,7 @@ static void print_usage(void)
     printf("\n");
     printf("Extract from a firmware image:\n");
     printf("  dsfwtool -x FIRMWARE.bin -h HEADER.bin\n");
+    printf("      [-rsa RSA_SIGNATURE.bin]  (iQue/Korean 0x200-0x27F block)\n");
     printf("      -p1 [-decrypt [-uncomp]] FILE\n");
     printf("      -p2 [-decrypt [-uncomp]] FILE\n");
     printf("      -p3 [-uncomp] FILE  -p4 [-uncomp] FILE  -p5 [-uncomp] FILE\n");
@@ -1424,6 +1425,7 @@ static void print_usage(void)
     printf("\n");
     printf("Create an official firmware image:\n");
     printf("  dsfwtool -c OUTPUT.bin -h HEADER.bin\n");
+    printf("      [-rsa RSA_SIGNATURE.bin]\n");
     printf("      -p1 [-encrypt | -comp [-tvout] -encrypt] [--offset OFFSET] FILE\n");
     printf("      -p2 [-encrypt | -comp [-tvout] -encrypt] [--offset OFFSET] FILE\n");
     printf("      -p3 [-comp [-flashme]] [--offset OFFSET] FILE\n");
@@ -1444,8 +1446,9 @@ static void print_usage(void)
     printf("  address.  P/FP starts must meet their header alignment.  The packed\n");
     printf("  (compressed/encrypted) size is used for overlap checks and header offsets\n");
     printf("  are rewritten automatically.  The primary header occupies 0x000000--0x00017F.\n");
-    printf("  --layout reads a FlashMe layout script: H uses 'fixed START-END'; FH uses\n");
-    printf("  'auto START-END' or 'fixed START-END' (the end is a readable annotation).\n");
+    printf("  --layout reads a layout script. Official scripts list H and P1--P5;\n");
+    printf("  FlashMe scripts additionally list FH, FP1, and FP2. H uses 'fixed START-END';\n");
+    printf("  FH uses 'auto START-END' or 'fixed START-END' (the end is a readable annotation).\n");
     printf("  P1/P2/P3/P4/P5/FP1/FP2 are listed in placement order with 'auto',\n");
     printf("  optional 'auto align N' for end-of-slot padding, or 'fixed OFFSET'.\n");
     printf("  Normal firmware reserves its final 0x600 bytes; FlashMe reserves only its\n");
@@ -1488,6 +1491,8 @@ static void print_usage(void)
     printf("  --shift-amounts VALUE  --part1-ramaddr VALUE  --part2-ramaddr VALUE\n");
     printf("  --settings-offset VALUE  --set-u8 OFFSET VALUE  --set-u16 OFFSET VALUE\n");
     printf("  --set-u32 OFFSET VALUE\n");
+    printf("  -rsa transfers the fixed 0x000200-0x00027F iQue/Korean RSA block;\n");
+    printf("  it is valid only when P1 begins after that range.\n");
     printf("  ROM offsets and component CRCs are recalculated, not user-settable.\n");
     printf("  --shift-amounts and --settings-offset are advanced: the former controls\n");
     printf("  P1/P2 alignment and RAM interpretation; the latter must match the\n");
@@ -1496,6 +1501,7 @@ static void print_usage(void)
 
 enum {
     FWCOMP_HEADER = 0,
+    FWCOMP_RSA_SIGNATURE,
     FWCOMP_P1,
     FWCOMP_P2,
     FWCOMP_P3,
@@ -1540,6 +1546,7 @@ enum {
     FLASH_LAYOUT_COMPONENT_COUNT,
     FLASH_LAYOUT_FH,
     FLASH_LAYOUT_H,
+    FLASH_LAYOUT_RSA,
     FLASH_LAYOUT_COUNT
 };
 
@@ -1550,6 +1557,8 @@ typedef struct {
     u32 slot_alignments[FLASH_LAYOUT_COMPONENT_COUNT];
     int order[FLASH_LAYOUT_COMPONENT_COUNT];
     int order_index[FLASH_LAYOUT_COMPONENT_COUNT];
+    int has_flashme;
+    int has_rsa;
 } FlashMeLayoutScript;
 
 typedef struct {
@@ -1568,7 +1577,7 @@ typedef struct {
 static const char *explicit_component_name(int component)
 {
     static const char *const names[FWCOMP_COUNT] = {
-        "header", "P1", "P2", "P3", "P4", "P5", "FlashMe header", "FlashMe P1", "FlashMe P2"
+        "header", "RSA signature", "P1", "P2", "P3", "P4", "P5", "FlashMe header", "FlashMe P1", "FlashMe P2"
     };
     if (component < 0 || component >= FWCOMP_COUNT) return "component";
     return names[component];
@@ -1577,6 +1586,7 @@ static const char *explicit_component_name(int component)
 static int explicit_component_kind(const char *option)
 {
     if (strcmp(option, "-h") == 0) return FWCOMP_HEADER;
+    if (strcmp(option, "-rsa") == 0) return FWCOMP_RSA_SIGNATURE;
     if (strcmp(option, "-p1") == 0) return FWCOMP_P1;
     if (strcmp(option, "-p2") == 0) return FWCOMP_P2;
     if (strcmp(option, "-p3") == 0) return FWCOMP_P3;
@@ -1719,8 +1729,10 @@ static int parse_explicit_component(int argc, char **argv, int *index, int creat
             print_error("%s --offset is only valid with -c", explicit_component_name(component));
             return -1;
         }
-        if (component == FWCOMP_HEADER) {
-            print_error("the primary header is fixed at physical offset 0x000000");
+        if (component == FWCOMP_HEADER || component == FWCOMP_RSA_SIGNATURE) {
+            print_error(component == FWCOMP_HEADER ?
+                        "the primary header is fixed at physical offset 0x000000" :
+                        "the RSA signature is fixed at physical offset 0x000200");
             return -1;
         }
         if (entry->has_offset) {
@@ -1850,10 +1862,6 @@ static int validate_explicit_firmware_request(const ExplicitFirmwareRequest *req
     flashme_any = request->components[FWCOMP_FLASH_HEADER].path != NULL ||
                    request->components[FWCOMP_FLASH_P1].path != NULL ||
                    request->components[FWCOMP_FLASH_P2].path != NULL;
-    if (request->layout_path != NULL && !flashme_any) {
-        print_error("--layout is valid only when creating a complete FlashMe image");
-        return -1;
-    }
     if (request->base_path == NULL && flashme_any &&
         (request->components[FWCOMP_FLASH_HEADER].path == NULL ||
                         request->components[FWCOMP_FLASH_P1].path == NULL ||
@@ -1974,6 +1982,7 @@ static int flashme_layout_name(const char *name)
     if (strcmp(name, "FP2") == 0) return FLASH_LAYOUT_FP2;
     if (strcmp(name, "FH") == 0) return FLASH_LAYOUT_FH;
     if (strcmp(name, "H") == 0) return FLASH_LAYOUT_H;
+    if (strcmp(name, "RSA") == 0) return FLASH_LAYOUT_RSA;
     return -1;
 }
 
@@ -2032,6 +2041,18 @@ static int parse_flashme_layout_script(const char *path, FlashMeLayoutScript *sc
                 return -1;
             }
             script->fixed[component] = 1;
+        } else if (component == FLASH_LAYOUT_RSA) {
+            u32 range_end;
+            if (strcmp(mode, "fixed") != 0 || fields != 3 ||
+                parse_layout_range(value, &script->offsets[component], &range_end) != 0 ||
+                script->offsets[component] != FW_RSA_SIGNATURE_OFFSET ||
+                range_end != FW_RSA_SIGNATURE_OFFSET + FW_RSA_SIGNATURE_SIZE - 1u) {
+                print_error("%s:%d: RSA must use fixed 0x000200-0x00027F", path, line_number);
+                fclose(file);
+                return -1;
+            }
+            script->fixed[component] = 1;
+            script->has_rsa = 1;
         } else if (component == FLASH_LAYOUT_FH) {
             u32 range_start;
             u32 range_end;
@@ -2075,8 +2096,22 @@ static int parse_flashme_layout_script(const char *path, FlashMeLayoutScript *sc
         if (component < FLASH_LAYOUT_COMPONENT_COUNT) script->order[order_count++] = component;
     }
     fclose(file);
-    if (order_count != FLASH_LAYOUT_COMPONENT_COUNT || !seen[FLASH_LAYOUT_FH] || !seen[FLASH_LAYOUT_H]) {
-        print_error("layout script '%s' must list H, P1, P2, P3, P4, P5, FP1, FP2, and FH exactly once", path);
+    for (int i = FLASH_LAYOUT_P1; i <= FLASH_LAYOUT_P5; i++) {
+        if (!seen[i]) {
+            print_error("layout script '%s' must list H and P1 through P5 exactly once", path);
+            return -1;
+        }
+    }
+    script->has_flashme = seen[FLASH_LAYOUT_FH] || seen[FLASH_LAYOUT_FP1] || seen[FLASH_LAYOUT_FP2];
+    if (!seen[FLASH_LAYOUT_H] ||
+        (script->has_flashme &&
+         (order_count != FLASH_LAYOUT_COMPONENT_COUNT || !seen[FLASH_LAYOUT_FH] ||
+          !seen[FLASH_LAYOUT_FP1] || !seen[FLASH_LAYOUT_FP2])) ||
+        (!script->has_flashme && order_count != 5) ||
+        (script->has_flashme && script->has_rsa)) {
+        print_error(script->has_flashme ?
+                    "FlashMe layout script '%s' must list H, P1, P2, P3, P4, P5, FP1, FP2, and FH exactly once" :
+                    "official layout script '%s' must list H and P1 through P5 exactly once", path);
         return -1;
     }
     for (int i = 0; i < order_count; i++) script->order_index[script->order[i]] = i;
@@ -2252,6 +2287,15 @@ static int command_explicit_extract(int argc, char **argv)
 
     if (request.components[FWCOMP_HEADER].path != NULL &&
         write_file(request.components[FWCOMP_HEADER].path, image.data, HEADER_BYTES) != 0) goto cleanup;
+    if (request.components[FWCOMP_RSA_SIGNATURE].path != NULL) {
+        if (layout.offsets[0] < FW_RSA_SIGNATURE_OFFSET + FW_RSA_SIGNATURE_SIZE ||
+            image.size < FW_RSA_SIGNATURE_OFFSET + FW_RSA_SIGNATURE_SIZE) {
+            print_error("the source firmware has no separate 0x200-0x27F RSA signature block");
+            goto cleanup;
+        }
+        if (write_file(request.components[FWCOMP_RSA_SIGNATURE].path,
+                       image.data + FW_RSA_SIGNATURE_OFFSET, FW_RSA_SIGNATURE_SIZE) != 0) goto cleanup;
+    }
 
     for (i = 0; i < 2; i++) {
         ExplicitComponent *entry = &request.components[FWCOMP_P1 + i];
@@ -2343,6 +2387,7 @@ static int command_explicit_create(int argc, char **argv)
     const char *output_path;
     ExplicitFirmwareRequest request;
     Blob header;
+    Blob rsa_signature;
     Blob flash_header;
     Blob base;
     FirmwareLayout base_layout;
@@ -2393,6 +2438,7 @@ static int command_explicit_create(int argc, char **argv)
     int result = 1;
 
     blob_init(&header);
+    blob_init(&rsa_signature);
     blob_init(&flash_header);
     blob_init(&base);
     memset(&layout_script, 0, sizeof(layout_script));
@@ -2420,10 +2466,16 @@ static int command_explicit_create(int argc, char **argv)
                   request.components[FWCOMP_FLASH_P2].path != NULL ||
                   (base_has_layout && base_layout.has_flashme);
     if (request.layout_path != NULL) {
-        if (!has_flashme || parse_flashme_layout_script(request.layout_path, &layout_script) != 0) goto cleanup;
+        if (parse_flashme_layout_script(request.layout_path, &layout_script) != 0) goto cleanup;
+        if (layout_script.has_flashme != has_flashme) {
+            print_error(layout_script.has_flashme ?
+                        "FlashMe layout cannot be used while creating an official firmware image" :
+                        "official layout cannot be used while creating a FlashMe image");
+            goto cleanup;
+        }
         has_layout_script = 1;
-        for (i = 0; i < FLASH_LAYOUT_COMPONENT_COUNT; i++) {
-            int component = i < 5 ? FWCOMP_P1 + i : FWCOMP_FLASH_P1 + (i - 5);
+        for (i = 0; i < 5; i++) {
+            int component = FWCOMP_P1 + i;
             if (!layout_script.fixed[i]) continue;
             if (request.components[component].has_offset &&
                 request.components[component].offset != layout_script.offsets[i]) {
@@ -2434,7 +2486,20 @@ static int command_explicit_create(int argc, char **argv)
             request.components[component].has_offset = 1;
             request.components[component].offset = layout_script.offsets[i];
         }
-        if (layout_script.fixed[FLASH_LAYOUT_FH]) {
+        for (i = 0; has_flashme && i < 2; i++) {
+            int layout_component = FLASH_LAYOUT_FP1 + i;
+            int component = FWCOMP_FLASH_P1 + i;
+            if (!layout_script.fixed[layout_component]) continue;
+            if (request.components[component].has_offset &&
+                request.components[component].offset != layout_script.offsets[layout_component]) {
+                print_error("%s has conflicting --offset and layout-script addresses",
+                            explicit_component_name(component));
+                goto cleanup;
+            }
+            request.components[component].has_offset = 1;
+            request.components[component].offset = layout_script.offsets[layout_component];
+        }
+        if (has_flashme && layout_script.fixed[FLASH_LAYOUT_FH]) {
             if (request.components[FWCOMP_FLASH_HEADER].has_offset &&
                 request.components[FWCOMP_FLASH_HEADER].offset !=
                     layout_script.offsets[FLASH_LAYOUT_FH]) {
@@ -2456,6 +2521,15 @@ static int command_explicit_create(int argc, char **argv)
     if (apply_header_edits(&header, &request.edits) != 0) goto cleanup;
     primary_header = (FW_HEADER *)header.data;
     flashme_source_part34_crc16 = primary_header->part34_crc16;
+    if (request.components[FWCOMP_RSA_SIGNATURE].path != NULL &&
+        (read_file(request.components[FWCOMP_RSA_SIGNATURE].path, &rsa_signature) != 0 ||
+         rsa_signature.size != FW_RSA_SIGNATURE_SIZE)) {
+        if (rsa_signature.size != 0 && rsa_signature.size != FW_RSA_SIGNATURE_SIZE) {
+            print_error("RSA signature input '%s' must be exactly 0x%X bytes",
+                        request.components[FWCOMP_RSA_SIGNATURE].path, FW_RSA_SIGNATURE_SIZE);
+        }
+        goto cleanup;
+    }
 
     if (base_has_layout && !has_layout_script) {
         for (i = 0; i < 5; i++) {
@@ -2557,11 +2631,21 @@ static int command_explicit_create(int argc, char **argv)
                                              flash_alignments, flash_reserved_sizes,
                                              flash_has_override, flash_override_offsets,
                                              primary_new_offsets, flash_new_offsets) != 0) goto cleanup;
-    } else if (build_relocated_positions_with_overrides(primary_original_offsets, primary_alignments,
+    } else {
+        if (has_layout_script) {
+            for (i = 0; i < 5; i++) {
+                if (!primary_has_override[i]) {
+                    primary_original_offsets[i] = HEADER_BYTES +
+                                                  (u32)layout_script.order_index[i];
+                }
+            }
+        }
+        if (build_relocated_positions_with_overrides(primary_original_offsets, primary_alignments,
                                                         primary_reserved_sizes, primary_has_override,
                                                         primary_override_offsets, 5,
                                                         primary_new_offsets) != 0) {
-        goto cleanup;
+            goto cleanup;
+        }
     }
     if (max_reserved_end(primary_new_offsets, primary_reserved_sizes, 5, &primary_end) != 0 ||
         (has_flashme && max_reserved_end(flash_new_offsets, flash_reserved_sizes, 2,
@@ -2630,8 +2714,11 @@ static int command_explicit_create(int argc, char **argv)
         goto cleanup;
     }
     protected_tail_offset = logical_capacity - protected_tail_size;
-    if (request.base_path != NULL) {
+    {
         u32 target_settings_tail_offset;
+        /* The header is a build template, not a capacity-specific binary
+           fragment.  Always derive its user-settings pointer from the output
+           capacity; -b only controls whether the private tail bytes migrate. */
         if (trailing_settings_location(logical_capacity, &target_settings_tail_offset,
                                        &target_user_settings_offset) != 0 ||
             set_header_user_settings_offset(&header, target_user_settings_offset) != 0 ||
@@ -2639,10 +2726,12 @@ static int command_explicit_create(int argc, char **argv)
                                                             target_user_settings_offset) != 0)) {
             goto cleanup;
         }
+        if (request.base_path != NULL) {
         base_copy_source_offset = base_settings_tail_offset;
         base_copy_target_offset = target_settings_tail_offset;
         base_copy_size = base_settings_tail_size;
         base_copy_expected_size = SETTINGS_TAIL_BYTES;
+        }
     }
     if (has_flashme) {
         flash_header_offset = flash_header_has_override ?
@@ -2657,8 +2746,21 @@ static int command_explicit_create(int argc, char **argv)
         print_error("the selected output size is too small for these components");
         goto cleanup;
     }
+    if (request.components[FWCOMP_RSA_SIGNATURE].path != NULL) {
+        if (primary_new_offsets[0] < FW_RSA_SIGNATURE_OFFSET + FW_RSA_SIGNATURE_SIZE) {
+            print_error("RSA signature overlaps P1; this layout is not an iQue/Korean signature layout");
+            goto cleanup;
+        }
+        if (has_layout_script && !layout_script.has_rsa) {
+            print_error("RSA signature input requires an RSA fixed entry in the layout script");
+            goto cleanup;
+        }
+    }
 
     if (add_firmware_range(ranges, &range_count, 0, HEADER_BYTES, output_size, "primary header") != 0) goto cleanup;
+    if (request.components[FWCOMP_RSA_SIGNATURE].path != NULL &&
+        add_firmware_range(ranges, &range_count, FW_RSA_SIGNATURE_OFFSET, FW_RSA_SIGNATURE_SIZE,
+                           output_size, "RSA signature") != 0) goto cleanup;
     if (add_firmware_range(ranges, &range_count, protected_tail_offset, protected_tail_size,
                            output_size, has_flashme ? "FlashMe user-settings tail" :
                            "Wi-Fi and user-settings tail") != 0) {
@@ -2706,6 +2808,9 @@ static int command_explicit_create(int argc, char **argv)
         memset(output.data, request.fill_byte, output.size);
     }
     memcpy(output.data, header.data, HEADER_BYTES);
+    if (request.components[FWCOMP_RSA_SIGNATURE].path != NULL) {
+        memcpy(output.data + FW_RSA_SIGNATURE_OFFSET, rsa_signature.data, rsa_signature.size);
+    }
     /* A normal image reserves the whole copied 0x600 tail.  FlashMe v1--v4,
        however, may put code in the preceding Wi-Fi area, so lay down the
        copied base bytes first in that mode and let an explicitly placed
@@ -2764,6 +2869,7 @@ static int command_explicit_create(int argc, char **argv)
 
 cleanup:
     blob_free(&header);
+    blob_free(&rsa_signature);
     blob_free(&flash_header);
     blob_free(&base);
     blob_free(&output);
